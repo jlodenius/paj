@@ -194,6 +194,15 @@ impl JobManager {
         Ok(updated)
     }
 
+    pub fn remove(&self, job: &Job) -> Result<(), JobError> {
+        self.stop(job)?;
+        let job_dir = self.job_dir(&job.project_id, job.id);
+        if job_dir.exists() {
+            fs::remove_dir_all(job_dir)?;
+        }
+        Ok(())
+    }
+
     pub fn log_path(&self, job: &Job) -> PathBuf {
         self.job_dir(&job.project_id, job.id).join("output.log")
     }

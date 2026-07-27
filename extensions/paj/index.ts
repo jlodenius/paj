@@ -245,6 +245,60 @@ export default function pajExtension(pi: ExtensionAPI) {
   });
 
   pi.registerTool({
+    name: "spawn_implementation_agent",
+    label: "Spawn implementation agent",
+    description:
+      "Spawn an observable Pi implementation agent in an isolated Git worktree and branch",
+    parameters: Type.Object({
+      branch: Type.String({
+        description: "Feature branch for the isolated worktree",
+      }),
+      prompt: Type.String({
+        description: "Complete implementation task and acceptance criteria",
+      }),
+      name: Type.Optional(Type.String({ description: "Optional agent name" })),
+      model: Type.Optional(Type.String({ description: "Optional Pi model" })),
+      thinking: Type.Optional(
+        Type.String({ description: "Optional thinking level" }),
+      ),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      if (!activeSessionId) {
+        throw new Error("paj session is not registered");
+      }
+      const args = [
+        "agent",
+        "spawn",
+        "--branch",
+        params.branch,
+        "--prompt",
+        params.prompt,
+        "--parent",
+        activeSessionId,
+      ];
+      if (params.name) {
+        args.push("--name", params.name);
+      }
+      if (params.model) {
+        args.push("--model", params.model);
+      }
+      if (params.thinking) {
+        args.push("--thinking", params.thinking);
+      }
+      const result = await pi.exec("paj", args, { cwd: ctx.cwd });
+      if (result.code !== 0) {
+        throw new Error(
+          result.stderr.trim() || `paj exited with code ${result.code}`,
+        );
+      }
+      return {
+        content: [{ type: "text", text: result.stdout.trim() }],
+        details: { branch: params.branch, name: params.name },
+      };
+    },
+  });
+
+  pi.registerTool({
     name: "run_subagent",
     label: "Run subagent",
     description:

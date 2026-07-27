@@ -70,6 +70,7 @@ paj job log dev-server --follow
 paj job send dev-server "r"
 paj job interrupt dev-server
 paj job stop dev-server
+paj job remove dev-server
 paj job attach dev-server
 ```
 
@@ -89,6 +90,25 @@ paj agent run \
 Prompts can also come from `--prompt-file`. `--provider`, `--model`, and `--thinking` select the model configuration. Subagents are instructed to work read-only and receive only the `read` and `bash` tools unless `--allow-write` is explicitly passed.
 
 Paj records the effective prompt, output, stderr, metadata, timing, and exit status under its runtime directory. When an artifact is requested, the CLI prints only the run ID and artifact path.
+
+## Background implementation agents
+
+Spawn an interactive Pi session in an isolated Git worktree:
+
+```sh
+paj agent spawn \
+  --branch feature/parser \
+  --prompt-file .agent/handoffs/parser.md
+
+paj agent list
+paj agent attach implementation-12345678
+paj agent stop implementation-12345678
+paj agent remove implementation-12345678
+```
+
+Automatic worktrees live under `$XDG_STATE_HOME/paj/worktrees` so they survive logout and runtime cleanup. Existing branches are reused when available; otherwise Paj creates the requested branch from `HEAD`. `remove` preserves dirty worktrees unless `--force` is passed and never deletes the branch.
+
+The `spawn_implementation_agent` tool sets the current Pi session as the parent. The child is instructed to commit coherent changes and send its parent a completion message.
 
 ## Pi extension
 

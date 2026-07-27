@@ -43,6 +43,21 @@ paj agent run --role review --prompt "Review changes since origin/master" --arti
 paj agent run --role research --prompt-file prompt.md
 ```
 
+## Background Implementation Agents
+
+Use `spawn_implementation_agent` only for implementation work that benefits from a clean context. Provide a unique feature branch and complete acceptance criteria. Paj creates an isolated durable Git worktree and starts an observable Pi session in its tmux server.
+
+Manage spawned agents with:
+
+```sh
+paj agent list
+paj agent attach <agent>
+paj agent stop <agent>
+paj agent remove <agent>
+```
+
+`remove` refuses to delete a dirty worktree. Use `--force` only when the user explicitly approves discarding its uncommitted changes. Review the agent's branch before integrating it. Never run a background implementation agent in the parent's worktree.
+
 ## Background Jobs
 
 Start commands through paj instead of raw background shell processes:
@@ -61,6 +76,7 @@ paj job log <name> --follow
 paj job send <name> <input>
 paj job interrupt <name>
 paj job stop <name>
+paj job remove <name>
 ```
 
-Use `paj job attach <name>` only when the user wants to interact with the tmux session directly. Inspect status and logs instead of starting duplicate jobs. Stop jobs when they are no longer needed unless the user wants them left running.
+Use `paj job attach <name>` only when the user wants to interact with the tmux session directly. Inspect status and logs instead of starting duplicate jobs. Stop jobs that may need later inspection; remove them when their metadata and logs are no longer useful.

@@ -6,6 +6,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use paj::agents::{AgentRunRequest, AgentRunState, AgentRunner};
+use paj::background_agents::{BackgroundAgent, BackgroundAgentManager, SpawnRequest};
 use paj::jobs::{Job, JobManager};
 use paj::project::Project;
 use paj::registry::{Message, Registration, Registry, Session};
@@ -133,6 +134,9 @@ enum JobCommands {
     Stop {
         job: String,
     },
+    Remove {
+        job: String,
+    },
     Attach {
         job: String,
     },
@@ -160,6 +164,38 @@ enum AgentCommands {
         #[arg(long)]
         allow_write: bool,
     },
+    Spawn {
+        #[arg(long)]
+        branch: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long, default_value = "implementation")]
+        role: String,
+        #[arg(long)]
+        parent: Option<Uuid>,
+        #[arg(long)]
+        worktree: Option<PathBuf>,
+        #[arg(long, conflicts_with = "prompt_file")]
+        prompt: Option<String>,
+        #[arg(long, conflicts_with = "prompt")]
+        prompt_file: Option<PathBuf>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        thinking: Option<String>,
+    },
+    List,
+    Stop {
+        agent: String,
+    },
+    Attach {
+        agent: String,
+    },
+    Remove {
+        agent: String,
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -173,10 +209,7 @@ fn main() -> Result<()> {
             let manager = JobManager::from_environment()?;
             run_job_command(&manager, command, cli.json)
         }
-        Commands::Agent { command } => {
-            let runner = AgentRunner::from_environment()?;
-            run_agent_command(&runner, command, cli.json)
-        }
+        Commands::Agent { command } => run_agent_command(command, cli.json),
         Commands::Gc { stale_after } => {
             let removed = registry.gc(Duration::from_secs(stale_after))?;
             print_sessions(&removed, cli.json, "No stale sessions found")
@@ -278,7 +311,7 @@ fn run_message_command(registry: &Registry, command: MessageCommands, json: bool
     }
 }
 
-fn run_agent_command(runner: &AgentRunner, command: AgentCommands, json: bool) -> Result<()> {
+fn run_agent_command(command: AgentCommands, json: bool) -> Result<()> {
     match command {
         AgentCommands::Run {
             role,
@@ -291,16 +324,10 @@ fn run_agent_command(runner: &AgentRunner, command: AgentCommands, json: bool) -
             thinking,
             allow_write,
         } => {
-            let prompt = match (prompt, prompt_file) {
-                (Some(prompt), None) => prompt,
-                (None, Some(path)) => std::fs::read_to_string(path)?,
-                (None, None) => {
-                    return Err(anyhow::anyhow!("--prompt or --prompt-file is required"));
-                }
-                (Some(_), Some(_)) => unreachable!(),
-            };
+            let prompt = read_prompt(prompt, prompt_file)?;
             let cwd = cwd.unwrap_or(env::current_dir()?).canonicalize()?;
             let project = Project::discover(&cwd)?;
+            let runner = AgentRunner::from_environment()?;
             let run = runner.run(
                 &project,
                 AgentRunRequest {
@@ -330,6 +357,87 @@ fn run_agent_command(runner: &AgentRunner, command: AgentCommands, json: bool) -
             }
             Ok(())
         }
+        AgentCommands::Spawn {
+            branch,
+            name,
+            role,
+            parent,
+            worktree,
+            prompt,
+            prompt_file,
+            model,
+            thinking,
+        } => {
+            let prompt = read_prompt(prompt, prompt_file)?;
+            let project = Project::discover(&env::current_dir()?)?;
+            let manager = BackgroundAgentManager::from_environment()?;
+            let agent = manager.spawn(
+                &project,
+                SpawnRequest {
+                    name,
+                    role,
+                    parent_session_id: parent,
+                    branch,
+                    worktree,
+                    prompt,
+                    model,
+                    thinking,
+                },
+            )?;
+            if json {
+                print_json(&agent)
+            } else {
+                println!(
+                    "{}\t{}\t{}\t{}",
+                    agent.id,
+                    agent.name,
+                    agent.branch,
+                    agent.worktree.display()
+                );
+                Ok(())
+            }
+        }
+        AgentCommands::List => {
+            let project = Project::discover(&env::current_dir()?)?;
+            let manager = BackgroundAgentManager::from_environment()?;
+            let agents = manager.list(&project.id)?;
+            if json {
+                print_json(&agents)
+            } else {
+                print_background_agents(&agents);
+                Ok(())
+            }
+        }
+        AgentCommands::Stop { agent } => {
+            let project = Project::discover(&env::current_dir()?)?;
+            let manager = BackgroundAgentManager::from_environment()?;
+            let agent = manager.resolve(&project.id, &agent)?;
+            manager.stop(&agent)?;
+            Ok(())
+        }
+        AgentCommands::Attach { agent } => {
+            let project = Project::discover(&env::current_dir()?)?;
+            let manager = BackgroundAgentManager::from_environment()?;
+            let agent = manager.resolve(&project.id, &agent)?;
+            manager.attach(&agent)?;
+            Ok(())
+        }
+        AgentCommands::Remove { agent, force } => {
+            let project = Project::discover(&env::current_dir()?)?;
+            let manager = BackgroundAgentManager::from_environment()?;
+            let agent = manager.resolve(&project.id, &agent)?;
+            manager.remove(&agent, force)?;
+            Ok(())
+        }
+    }
+}
+
+fn read_prompt(prompt: Option<String>, prompt_file: Option<PathBuf>) -> Result<String> {
+    match (prompt, prompt_file) {
+        (Some(prompt), None) => Ok(prompt),
+        (None, Some(path)) => Ok(std::fs::read_to_string(path)?),
+        (None, None) => Err(anyhow::anyhow!("--prompt or --prompt-file is required")),
+        (Some(_), Some(_)) => unreachable!(),
     }
 }
 
@@ -405,6 +513,11 @@ fn run_job_command(manager: &JobManager, command: JobCommands, json: bool) -> Re
             let stopped = manager.stop(&job)?;
             if json { print_json(&stopped) } else { Ok(()) }
         }
+        JobCommands::Remove { job } => {
+            let job = manager.resolve(&project.id, &job)?;
+            manager.remove(&job)?;
+            Ok(())
+        }
         JobCommands::Attach { job } => {
             let job = manager.resolve(&project.id, &job)?;
             manager.attach(&job)?;
@@ -448,6 +561,19 @@ fn print_sessions(sessions: &[Session], json: bool, empty_message: &str) -> Resu
         );
     }
     Ok(())
+}
+
+fn print_background_agents(agents: &[BackgroundAgent]) {
+    for agent in agents {
+        println!(
+            "{}\t{}\t{:?}\t{}\t{}",
+            agent.id,
+            agent.name,
+            agent.state,
+            agent.branch,
+            agent.worktree.display()
+        );
+    }
 }
 
 fn print_jobs(jobs: &[Job]) {
