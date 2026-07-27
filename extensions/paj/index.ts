@@ -1,7 +1,4 @@
-import type {
-  ExtensionAPI,
-  ExtensionContext,
-} from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 interface PajSession {
   id: string;
@@ -36,12 +33,6 @@ export default function pajExtension(pi: ExtensionAPI) {
     return result.stdout;
   };
 
-  const setConnectedStatus = (ctx: ExtensionContext, name: string) => {
-    if (ctx.hasUI) {
-      ctx.ui.setStatus("paj", ctx.ui.theme.fg("dim", `paj:${name}`));
-    }
-  };
-
   pi.on("session_start", async (_event, ctx) => {
     const args = [
       "--json",
@@ -65,7 +56,6 @@ export default function pajExtension(pi: ExtensionAPI) {
       const output = await execPaj(args, ctx.cwd);
       const session = JSON.parse(output) as PajSession;
       activeSessionId = session.id;
-      setConnectedStatus(ctx, session.name);
       heartbeatTimer = setInterval(() => {
         if (!activeSessionId || heartbeatPending) {
           return;
@@ -74,7 +64,7 @@ export default function pajExtension(pi: ExtensionAPI) {
           ["session", "heartbeat", activeSessionId],
           ctx.cwd,
         )
-          .then(() => setConnectedStatus(ctx, session.name))
+          .then(() => ctx.ui.setStatus("paj", undefined))
           .catch((error: unknown) => {
             if (ctx.hasUI) {
               ctx.ui.setStatus(
