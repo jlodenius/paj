@@ -39,6 +39,18 @@ Commands use `$XDG_RUNTIME_DIR/paj`. Set `PAJ_RUNTIME_DIR` to override the runti
 
 A session is stale when its heartbeat exceeds the configured threshold or its process no longer exists. Runtime data is private to the current user and is removed naturally when the user runtime directory is cleared.
 
+## Pi extension
+
+The extension in `extensions/paj` registers each Pi session automatically, sends a heartbeat every ten seconds, unregisters during clean shutdown, and provides `/agents [all]`.
+
+Test it directly from this repository:
+
+```sh
+pi -e ./extensions/paj
+```
+
+The executable must be available on `PATH` before loading the extension.
+
 ## Development
 
 ```sh

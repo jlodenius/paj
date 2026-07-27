@@ -38,6 +38,8 @@ enum SessionCommands {
         #[arg(long)]
         pid: u32,
         #[arg(long)]
+        pi_session_id: Option<String>,
+        #[arg(long)]
         name: Option<String>,
         #[arg(long, default_value = "primary")]
         role: String,
@@ -78,6 +80,7 @@ fn run_session_command(registry: &Registry, command: SessionCommands, json: bool
     match command {
         SessionCommands::Register {
             pid,
+            pi_session_id,
             name,
             role,
             task,
@@ -87,6 +90,7 @@ fn run_session_command(registry: &Registry, command: SessionCommands, json: bool
             let project = Project::discover(&cwd)?;
             let registration = Registration {
                 pid,
+                pi_session_id,
                 name,
                 role,
                 task,
@@ -176,6 +180,10 @@ fn print_session(session: &Session) {
     println!("id: {}", session.id);
     println!("name: {}", session.name);
     println!("pid: {}", session.pid);
+    println!(
+        "pi session: {}",
+        session.pi_session_id.as_deref().unwrap_or("-")
+    );
     println!("project: {}", session.project_root.display());
     println!("cwd: {}", session.cwd.display());
     println!("branch: {}", session.branch.as_deref().unwrap_or("-"));

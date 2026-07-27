@@ -19,6 +19,7 @@ pub struct Session {
     pub id: Uuid,
     pub name: String,
     pub pid: u32,
+    pub pi_session_id: Option<String>,
     pub project_id: String,
     pub project_root: PathBuf,
     pub cwd: PathBuf,
@@ -33,6 +34,7 @@ pub struct Session {
 #[derive(Debug, Clone)]
 pub struct Registration {
     pub pid: u32,
+    pub pi_session_id: Option<String>,
     pub name: Option<String>,
     pub role: String,
     pub task: Option<String>,
@@ -76,6 +78,7 @@ impl Registry {
                 .name
                 .unwrap_or_else(|| format!("agent-{short_id}")),
             pid: registration.pid,
+            pi_session_id: registration.pi_session_id,
             project_id: project.id.clone(),
             project_root: project.root.clone(),
             cwd: registration.cwd,
@@ -338,6 +341,7 @@ mod tests {
     fn registration(pid: u32) -> Registration {
         Registration {
             pid,
+            pi_session_id: Some("pi-session-id".to_owned()),
             name: Some("primary".to_owned()),
             role: "primary".to_owned(),
             task: None,
