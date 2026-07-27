@@ -6,6 +6,14 @@ The current milestone implements the local session registry.
 
 ## Install
 
+With Nix:
+
+```sh
+nix profile install github:jlodenius/paj
+```
+
+From a source checkout:
+
 ```sh
 cargo install --path .
 ```
