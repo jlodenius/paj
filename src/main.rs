@@ -6,7 +6,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use paj::project::Project;
-use paj::registry::{Registration, Registry, Session};
+use paj::registry::{Message, Registration, Registry, Session};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -25,6 +25,10 @@ enum Commands {
     Session {
         #[command(subcommand)]
         command: SessionCommands,
+    },
+    Message {
+        #[command(subcommand)]
+        command: MessageCommands,
     },
     Gc {
         #[arg(long, default_value_t = 60)]
@@ -63,12 +67,31 @@ enum SessionCommands {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum MessageCommands {
+    Send {
+        recipient: String,
+        #[arg(long)]
+        from: Uuid,
+        #[arg(long)]
+        text: String,
+    },
+    Pending {
+        session: Uuid,
+    },
+    Ack {
+        session: Uuid,
+        message: Uuid,
+    },
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let registry = Registry::from_environment()?;
 
     match cli.command {
         Commands::Session { command } => run_session_command(&registry, command, cli.json),
+        Commands::Message { command } => run_message_command(&registry, command, cli.json),
         Commands::Gc { stale_after } => {
             let removed = registry.gc(Duration::from_secs(stale_after))?;
             print_sessions(&removed, cli.json, "No stale sessions found")
@@ -139,6 +162,37 @@ fn run_session_command(registry: &Registry, command: SessionCommands, json: bool
     }
 }
 
+fn run_message_command(registry: &Registry, command: MessageCommands, json: bool) -> Result<()> {
+    match command {
+        MessageCommands::Send {
+            recipient,
+            from,
+            text,
+        } => {
+            let message = registry.send_message(from, &recipient, text)?;
+            if json {
+                print_json(&message)
+            } else {
+                println!("{}", message.id);
+                Ok(())
+            }
+        }
+        MessageCommands::Pending { session } => {
+            let messages = registry.pending_messages(session)?;
+            if json {
+                print_json(&messages)
+            } else {
+                print_messages(&messages);
+                Ok(())
+            }
+        }
+        MessageCommands::Ack { session, message } => {
+            registry.acknowledge_message(session, message)?;
+            Ok(())
+        }
+    }
+}
+
 fn git_branch(root: &Path) -> Option<String> {
     let output = Command::new("git")
         .args(["branch", "--show-current"])
@@ -174,6 +228,12 @@ fn print_sessions(sessions: &[Session], json: bool, empty_message: &str) -> Resu
         );
     }
     Ok(())
+}
+
+fn print_messages(messages: &[Message]) {
+    for message in messages {
+        println!("{}\t{}\t{}", message.id, message.from.name, message.text);
+    }
 }
 
 fn print_session(session: &Session) {

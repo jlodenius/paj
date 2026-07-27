@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use crate::project::Project;
 
+const INBOX_DIRECTORY: &str = "inbox";
 const LOCK_FILE: &str = ".lock";
 const METADATA_FILE: &str = "metadata.json";
 
@@ -40,6 +41,23 @@ pub struct Registration {
     pub task: Option<String>,
     pub cwd: PathBuf,
     pub branch: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageSender {
+    pub id: Uuid,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Message {
+    pub id: Uuid,
+    pub from: MessageSender,
+    pub to: Uuid,
+    pub text: String,
+    pub created_at_ms: u64,
 }
 
 #[derive(Debug)]
@@ -168,6 +186,76 @@ impl Registry {
             .collect())
     }
 
+    pub fn send_message(
+        &self,
+        sender_id: Uuid,
+        recipient: &str,
+        text: String,
+    ) -> Result<Message, RegistryError> {
+        let sender = self.show(sender_id)?;
+        let recipient = self.resolve_live_session(recipient)?;
+        let message = Message {
+            id: Uuid::now_v7(),
+            from: MessageSender {
+                id: sender.id,
+                name: sender.name,
+            },
+            to: recipient.id,
+            text,
+            created_at_ms: now_ms()?,
+        };
+        let session_dir = self.session_dir(&recipient.project_id, recipient.id);
+        let lock = open_lock(&session_dir)?;
+        lock.lock_exclusive()?;
+        let path = session_dir
+            .join(INBOX_DIRECTORY)
+            .join(format!("{}.json", message.id));
+        write_json_atomically(&path, &message)?;
+        Ok(message)
+    }
+
+    pub fn pending_messages(&self, session_id: Uuid) -> Result<Vec<Message>, RegistryError> {
+        let session_dir = self.find_session_dir(session_id)?;
+        let lock = open_lock(&session_dir)?;
+        lock.lock_shared()?;
+        let inbox = session_dir.join(INBOX_DIRECTORY);
+        let Ok(entries) = fs::read_dir(inbox) else {
+            return Ok(Vec::new());
+        };
+        let mut messages: Vec<Message> = Vec::new();
+        for entry in entries {
+            let entry = entry?;
+            if entry.file_type()?.is_file()
+                && entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "json")
+            {
+                messages.push(read_json(&entry.path())?);
+            }
+        }
+        messages.sort_by_key(|message| message.created_at_ms);
+        Ok(messages)
+    }
+
+    pub fn acknowledge_message(
+        &self,
+        session_id: Uuid,
+        message_id: Uuid,
+    ) -> Result<(), RegistryError> {
+        let session_dir = self.find_session_dir(session_id)?;
+        let lock = open_lock(&session_dir)?;
+        lock.lock_exclusive()?;
+        let path = session_dir
+            .join(INBOX_DIRECTORY)
+            .join(format!("{message_id}.json"));
+        if !path.is_file() {
+            return Err(RegistryError::MessageNotFound(message_id));
+        }
+        fs::remove_file(path)?;
+        Ok(())
+    }
+
     pub fn gc(&self, stale_after: Duration) -> Result<Vec<Session>, RegistryError> {
         let now = now_ms()?;
         let stale_after_ms = duration_ms(stale_after);
@@ -188,6 +276,21 @@ impl Registry {
         }
 
         Ok(removed)
+    }
+
+    fn resolve_live_session(&self, reference: &str) -> Result<Session, RegistryError> {
+        let matches = self
+            .list_live(None, Duration::from_secs(60))?
+            .into_iter()
+            .filter(|session| {
+                session.name == reference || session.id.to_string().starts_with(reference)
+            })
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [] => Err(RegistryError::RecipientNotFound(reference.to_owned())),
+            [session] => Ok(session.clone()),
+            _ => Err(RegistryError::AmbiguousRecipient(reference.to_owned())),
+        }
     }
 
     fn session_dir(&self, project_id: &str, session_id: Uuid) -> PathBuf {
@@ -221,12 +324,27 @@ fn read_session(directory: &Path) -> Result<Session, RegistryError> {
         .map_err(|source| RegistryError::ParseMetadata { path, source })
 }
 
-fn write_json_atomically(path: &Path, value: &Session) -> Result<(), RegistryError> {
+fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, RegistryError> {
+    let contents = fs::read(path).map_err(|source| RegistryError::ReadMetadata {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    serde_json::from_slice(&contents).map_err(|source| RegistryError::ParseMetadata {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn write_json_atomically<T: Serialize>(path: &Path, value: &T) -> Result<(), RegistryError> {
     let parent = path
         .parent()
         .ok_or_else(|| RegistryError::InvalidMetadataPath(path.to_path_buf()))?;
     fs::create_dir_all(parent)?;
-    let temporary = parent.join(format!(".{METADATA_FILE}.{}.tmp", Uuid::now_v7()));
+    let filename = path
+        .file_name()
+        .ok_or_else(|| RegistryError::InvalidMetadataPath(path.to_path_buf()))?
+        .to_string_lossy();
+    let temporary = parent.join(format!(".{filename}.{}.tmp", Uuid::now_v7()));
     let contents = serde_json::to_vec_pretty(value)?;
     fs::write(&temporary, contents)?;
     set_private_file_permissions(&temporary)?;
@@ -296,6 +414,12 @@ pub enum RegistryError {
     MissingRuntimeDirectory,
     #[error("session {0} was not found")]
     SessionNotFound(Uuid),
+    #[error("no live agent matches {0}")]
+    RecipientNotFound(String),
+    #[error("multiple live agents match {0}")]
+    AmbiguousRecipient(String),
+    #[error("message {0} was not found")]
+    MessageNotFound(Uuid),
     #[error("failed to read session metadata at {path}")]
     ReadMetadata {
         path: PathBuf,
@@ -457,6 +581,59 @@ mod tests {
         let result = registry.show(registered.id);
 
         assert!(matches!(result, Err(RegistryError::SessionNotFound(_))));
+    }
+
+    #[test]
+    fn send_message_delivers_to_named_recipient() {
+        let directory = tempdir().expect("temporary directory should be created");
+        let registry =
+            Registry::new(directory.path().join("paj")).expect("registry should be created");
+        let mut sender_registration = registration(std::process::id());
+        sender_registration.name = Some("sender".to_owned());
+        let sender = registry
+            .register(&project(), sender_registration)
+            .expect("sender should be registered");
+        let mut recipient_registration = registration(std::process::id());
+        recipient_registration.name = Some("recipient".to_owned());
+        let recipient = registry
+            .register(&project(), recipient_registration)
+            .expect("recipient should be registered");
+
+        let sent = registry
+            .send_message(sender.id, "recipient", "hello".to_owned())
+            .expect("message should be sent");
+        let pending = registry
+            .pending_messages(recipient.id)
+            .expect("messages should be listed");
+
+        assert_eq!(pending, vec![sent]);
+    }
+
+    #[test]
+    fn acknowledge_message_removes_pending_message() {
+        let directory = tempdir().expect("temporary directory should be created");
+        let registry =
+            Registry::new(directory.path().join("paj")).expect("registry should be created");
+        let sender = registry
+            .register(&project(), registration(std::process::id()))
+            .expect("sender should be registered");
+        let mut recipient_registration = registration(std::process::id());
+        recipient_registration.name = Some("recipient".to_owned());
+        let recipient = registry
+            .register(&project(), recipient_registration)
+            .expect("recipient should be registered");
+        let message = registry
+            .send_message(sender.id, "recipient", "hello".to_owned())
+            .expect("message should be sent");
+
+        registry
+            .acknowledge_message(recipient.id, message.id)
+            .expect("message should be acknowledged");
+        let pending = registry
+            .pending_messages(recipient.id)
+            .expect("messages should be listed");
+
+        assert!(pending.is_empty());
     }
 
     #[test]

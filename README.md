@@ -47,9 +47,26 @@ Commands use `$XDG_RUNTIME_DIR/paj`. Set `PAJ_RUNTIME_DIR` to override the runti
 
 A session is stale when its heartbeat exceeds the configured threshold or its process no longer exists. Runtime data is private to the current user and is removed naturally when the user runtime directory is cleared.
 
+## Agent messaging
+
+```sh
+paj message send <agent> --from <session-id> --text "Please review parser.rs"
+paj --json message pending <session-id>
+paj message ack <session-id> <message-id>
+```
+
+Recipients can be addressed by exact name or session ID prefix. Messages remain pending until the recipient acknowledges them.
+
 ## Pi extension
 
-The extension in `extensions/paj` registers each Pi session automatically, sends a heartbeat every ten seconds, unregisters during clean shutdown, and provides `/agents [all]`.
+The extension in `extensions/paj` registers each Pi session automatically, sends a heartbeat every ten seconds, unregisters during clean shutdown, and provides:
+
+```text
+/agents [all]
+/agent-send <agent> <message>
+```
+
+Agents can send messages through the `send_agent_message` tool. Incoming messages are delivered as user messages and queued as follow-ups when the recipient is busy.
 
 Test it directly from this repository:
 

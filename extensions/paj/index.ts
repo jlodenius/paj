@@ -1,4 +1,16 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
+
+interface PajMessage {
+  id: string;
+  from: {
+    name: string;
+  };
+  text: string;
+}
 
 interface PajSession {
   id: string;
@@ -14,11 +26,14 @@ interface PajSession {
 
 const COMMAND_TIMEOUT_MS = 5_000;
 const HEARTBEAT_INTERVAL_MS = 10_000;
+const MESSAGE_POLL_INTERVAL_MS = 1_000;
 
 export default function pajExtension(pi: ExtensionAPI) {
   let activeSessionId: string | undefined;
   let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
   let heartbeatPending: Promise<void> | undefined;
+  let messageTimer: ReturnType<typeof setInterval> | undefined;
+  let messagePollPending: Promise<void> | undefined;
 
   const execPaj = async (args: string[], cwd: string) => {
     const result = await pi.exec("paj", args, {
@@ -31,6 +46,48 @@ export default function pajExtension(pi: ExtensionAPI) {
       );
     }
     return result.stdout;
+  };
+
+  const sendToAgent = async (recipient: string, text: string, cwd: string) => {
+    if (!activeSessionId) {
+      throw new Error("paj session is not registered");
+    }
+    const output = await execPaj(
+      [
+        "--json",
+        "message",
+        "send",
+        recipient,
+        "--from",
+        activeSessionId,
+        "--text",
+        text,
+      ],
+      cwd,
+    );
+    return JSON.parse(output) as PajMessage;
+  };
+
+  const pollMessages = async (ctx: ExtensionContext) => {
+    if (!activeSessionId) {
+      return;
+    }
+    const output = await execPaj(
+      ["--json", "message", "pending", activeSessionId],
+      ctx.cwd,
+    );
+    const messages = JSON.parse(output) as PajMessage[];
+    let deliverImmediately = ctx.isIdle();
+    for (const message of messages) {
+      const content = `[Message from ${message.from.name}]\n${message.text}`;
+      if (deliverImmediately) {
+        pi.sendUserMessage(content);
+        deliverImmediately = false;
+      } else {
+        pi.sendUserMessage(content, { deliverAs: "followUp" });
+      }
+      await execPaj(["message", "ack", activeSessionId, message.id], ctx.cwd);
+    }
   };
 
   pi.on("session_start", async (_event, ctx) => {
@@ -78,6 +135,20 @@ export default function pajExtension(pi: ExtensionAPI) {
             heartbeatPending = undefined;
           });
       }, HEARTBEAT_INTERVAL_MS);
+      const poll = () => {
+        if (messagePollPending) {
+          return;
+        }
+        messagePollPending = pollMessages(ctx)
+          .catch((error: unknown) =>
+            console.error("paj message poll failed", error),
+          )
+          .finally(() => {
+            messagePollPending = undefined;
+          });
+      };
+      messageTimer = setInterval(poll, MESSAGE_POLL_INTERVAL_MS);
+      poll();
     } catch (error) {
       if (ctx.hasUI) {
         ctx.ui.setStatus("paj", ctx.ui.theme.fg("error", "paj:disconnected"));
@@ -91,7 +162,11 @@ export default function pajExtension(pi: ExtensionAPI) {
       clearInterval(heartbeatTimer);
       heartbeatTimer = undefined;
     }
-    await heartbeatPending;
+    if (messageTimer) {
+      clearInterval(messageTimer);
+      messageTimer = undefined;
+    }
+    await Promise.all([heartbeatPending, messagePollPending]);
     const sessionId = activeSessionId;
     activeSessionId = undefined;
     if (sessionId) {
@@ -104,6 +179,29 @@ export default function pajExtension(pi: ExtensionAPI) {
     if (ctx.hasUI) {
       ctx.ui.setStatus("paj", undefined);
     }
+  });
+
+  pi.registerCommand("agent-send", {
+    description: "Send a message to another live Pi agent",
+    handler: async (args, ctx) => {
+      const separator = args.search(/\s/);
+      if (separator === -1) {
+        ctx.ui.notify("Usage: /agent-send <agent> <message>", "warning");
+        return;
+      }
+      const recipient = args.slice(0, separator);
+      const text = args.slice(separator).trim();
+      if (!text) {
+        ctx.ui.notify("Usage: /agent-send <agent> <message>", "warning");
+        return;
+      }
+      try {
+        await sendToAgent(recipient, text, ctx.cwd);
+        ctx.ui.notify(`Message sent to ${recipient}`, "info");
+      } catch (error) {
+        ctx.ui.notify(`Failed to send message: ${String(error)}`, "error");
+      }
+    },
   });
 
   pi.registerCommand("agents", {
@@ -139,6 +237,28 @@ export default function pajExtension(pi: ExtensionAPI) {
       } catch (error) {
         ctx.ui.notify(`Failed to list agents: ${String(error)}`, "error");
       }
+    },
+  });
+
+  pi.registerTool({
+    name: "send_agent_message",
+    label: "Send agent message",
+    description: "Send a message to another live Pi agent listed by /agents",
+    parameters: Type.Object({
+      recipient: Type.String({ description: "Agent name or session ID" }),
+      text: Type.String({ description: "Message to send" }),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const message = await sendToAgent(params.recipient, params.text, ctx.cwd);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Message ${message.id} sent to ${params.recipient}`,
+          },
+        ],
+        details: message,
+      };
     },
   });
 }
