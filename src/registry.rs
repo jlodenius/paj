@@ -71,7 +71,8 @@ impl Registry {
     ) -> Result<Session, RegistryError> {
         let id = Uuid::now_v7();
         let now = now_ms()?;
-        let short_id = &id.simple().to_string()[..8];
+        let simple_id = id.simple().to_string();
+        let short_id = &simple_id[simple_id.len() - 8..];
         let session = Session {
             id,
             name: registration
@@ -364,6 +365,26 @@ mod tests {
             .expect("session should be loaded");
 
         assert_eq!(loaded, registered);
+    }
+
+    #[test]
+    fn register_generates_distinct_default_names() {
+        let directory = tempdir().expect("temporary directory should be created");
+        let registry =
+            Registry::new(directory.path().join("paj")).expect("registry should be created");
+        let mut first_registration = registration(std::process::id());
+        first_registration.name = None;
+        let mut second_registration = registration(std::process::id());
+        second_registration.name = None;
+        let first = registry
+            .register(&project(), first_registration)
+            .expect("first session should be registered");
+
+        let second = registry
+            .register(&project(), second_registration)
+            .expect("second session should be registered");
+
+        assert_ne!(first.name, second.name);
     }
 
     #[test]
