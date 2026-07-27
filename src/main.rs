@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use paj::jobs::{Job, JobManager};
 use paj::project::Project;
 use paj::registry::{Message, Registration, Registry, Session};
 use serde::Serialize;
@@ -29,6 +30,10 @@ enum Commands {
     Message {
         #[command(subcommand)]
         command: MessageCommands,
+    },
+    Job {
+        #[command(subcommand)]
+        command: JobCommands,
     },
     Gc {
         #[arg(long, default_value_t = 60)]
@@ -85,6 +90,49 @@ enum MessageCommands {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum JobCommands {
+    Start {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        owner: Option<Uuid>,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
+    List {
+        #[arg(long)]
+        all: bool,
+    },
+    Status {
+        job: String,
+    },
+    Log {
+        job: String,
+        #[arg(long, default_value_t = 200)]
+        lines: usize,
+        #[arg(long)]
+        follow: bool,
+    },
+    Send {
+        job: String,
+        input: String,
+        #[arg(long)]
+        no_enter: bool,
+    },
+    Interrupt {
+        job: String,
+    },
+    Stop {
+        job: String,
+    },
+    Attach {
+        job: String,
+    },
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let registry = Registry::from_environment()?;
@@ -92,6 +140,10 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Session { command } => run_session_command(&registry, command, cli.json),
         Commands::Message { command } => run_message_command(&registry, command, cli.json),
+        Commands::Job { command } => {
+            let manager = JobManager::from_environment()?;
+            run_job_command(&manager, command, cli.json)
+        }
         Commands::Gc { stale_after } => {
             let removed = registry.gc(Duration::from_secs(stale_after))?;
             print_sessions(&removed, cli.json, "No stale sessions found")
@@ -193,6 +245,86 @@ fn run_message_command(registry: &Registry, command: MessageCommands, json: bool
     }
 }
 
+fn run_job_command(manager: &JobManager, command: JobCommands, json: bool) -> Result<()> {
+    let current_dir = env::current_dir()?;
+    let project = Project::discover(&current_dir)?;
+    match command {
+        JobCommands::Start {
+            name,
+            owner,
+            cwd,
+            command,
+        } => {
+            let cwd = cwd.unwrap_or(current_dir).canonicalize()?;
+            let job = manager.start(&project, name, owner, cwd, command)?;
+            if json {
+                print_json(&job)
+            } else {
+                println!("{}\t{}", job.id, job.name);
+                Ok(())
+            }
+        }
+        JobCommands::List { all } => {
+            let jobs = manager.list((!all).then_some(project.id.as_str()))?;
+            if json {
+                print_json(&jobs)
+            } else {
+                print_jobs(&jobs);
+                Ok(())
+            }
+        }
+        JobCommands::Status { job } => {
+            let job = manager.resolve(&project.id, &job)?;
+            if json {
+                print_json(&job)
+            } else {
+                print_jobs(&[job]);
+                Ok(())
+            }
+        }
+        JobCommands::Log { job, lines, follow } => {
+            let job = manager.resolve(&project.id, &job)?;
+            let mut tail = Command::new("tail");
+            if follow {
+                tail.arg("-f");
+            }
+            let status = tail
+                .args(["-n", &lines.to_string()])
+                .arg(manager.log_path(&job))
+                .status()?;
+            if status.success() {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!("tail exited with {status}"))
+            }
+        }
+        JobCommands::Send {
+            job,
+            input,
+            no_enter,
+        } => {
+            let job = manager.resolve(&project.id, &job)?;
+            manager.send(&job, &input, !no_enter)?;
+            Ok(())
+        }
+        JobCommands::Interrupt { job } => {
+            let job = manager.resolve(&project.id, &job)?;
+            manager.interrupt(&job)?;
+            Ok(())
+        }
+        JobCommands::Stop { job } => {
+            let job = manager.resolve(&project.id, &job)?;
+            let stopped = manager.stop(&job)?;
+            if json { print_json(&stopped) } else { Ok(()) }
+        }
+        JobCommands::Attach { job } => {
+            let job = manager.resolve(&project.id, &job)?;
+            manager.attach(&job)?;
+            Ok(())
+        }
+    }
+}
+
 fn git_branch(root: &Path) -> Option<String> {
     let output = Command::new("git")
         .args(["branch", "--show-current"])
@@ -228,6 +360,18 @@ fn print_sessions(sessions: &[Session], json: bool, empty_message: &str) -> Resu
         );
     }
     Ok(())
+}
+
+fn print_jobs(jobs: &[Job]) {
+    for job in jobs {
+        println!(
+            "{}\t{}\t{:?}\t{}",
+            job.id,
+            job.name,
+            job.state,
+            job.command.join(" ")
+        );
+    }
 }
 
 fn print_messages(messages: &[Message]) {

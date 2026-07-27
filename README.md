@@ -57,6 +57,24 @@ paj message ack <session-id> <message-id>
 
 Recipients can be addressed by exact name or session ID prefix. Messages remain pending until the recipient acknowledges them.
 
+## Background jobs
+
+Jobs run in a dedicated tmux server and retain their pane after exit for inspection:
+
+```sh
+paj job start --name dev-server -- npm run dev
+paj job list
+paj job status dev-server
+paj job log dev-server --lines 200
+paj job log dev-server --follow
+paj job send dev-server "r"
+paj job interrupt dev-server
+paj job stop dev-server
+paj job attach dev-server
+```
+
+Job output and metadata live under the Paj runtime directory. Commands are passed directly to tmux without shell interpolation.
+
 ## Pi extension
 
 The extension in `extensions/paj` registers each Pi session automatically, sends a heartbeat every ten seconds, unregisters during clean shutdown, and provides:
