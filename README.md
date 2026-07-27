@@ -75,6 +75,21 @@ paj job attach dev-server
 
 Job output and metadata live under the Paj runtime directory. Commands are passed directly to tmux without shell interpolation.
 
+## Foreground subagents
+
+Run a clean Pi process for bounded specialist work:
+
+```sh
+paj agent run \
+  --role review \
+  --prompt "Review changes since origin/master" \
+  --artifact .agent/subagents/review.md
+```
+
+Prompts can also come from `--prompt-file`. `--provider`, `--model`, and `--thinking` select the model configuration. Subagents are instructed to work read-only and receive only the `read` and `bash` tools unless `--allow-write` is explicitly passed.
+
+Paj records the effective prompt, output, stderr, metadata, timing, and exit status under its runtime directory. When an artifact is requested, the CLI prints only the run ID and artifact path.
+
 ## Pi extension
 
 The extension in `extensions/paj` registers each Pi session automatically, sends a heartbeat every ten seconds, unregisters during clean shutdown, and provides:

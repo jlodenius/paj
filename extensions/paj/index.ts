@@ -100,13 +100,17 @@ export default function pajExtension(pi: ExtensionAPI) {
       "--pi-session-id",
       ctx.sessionManager.getSessionId(),
       "--role",
-      "primary",
+      process.env.PAJ_ROLE ?? "primary",
       "--cwd",
       ctx.cwd,
     ];
-    const name = pi.getSessionName();
+    const name = pi.getSessionName() ?? process.env.PAJ_AGENT_NAME;
     if (name) {
       args.push("--name", name);
+    }
+    const task = process.env.PAJ_TASK;
+    if (task) {
+      args.push("--task", task);
     }
 
     try {
@@ -237,6 +241,57 @@ export default function pajExtension(pi: ExtensionAPI) {
       } catch (error) {
         ctx.ui.notify(`Failed to list agents: ${String(error)}`, "error");
       }
+    },
+  });
+
+  pi.registerTool({
+    name: "run_subagent",
+    label: "Run subagent",
+    description:
+      "Run a clean foreground Pi subagent for bounded review, research, or diagnosis work",
+    parameters: Type.Object({
+      role: Type.String({
+        description: "Specialist role such as review, research, or diagnosis",
+      }),
+      prompt: Type.String({ description: "Complete task for the subagent" }),
+      artifact: Type.Optional(
+        Type.String({
+          description: "Repository-relative path for the final result",
+        }),
+      ),
+      model: Type.Optional(Type.String({ description: "Optional Pi model" })),
+      thinking: Type.Optional(
+        Type.String({ description: "Optional thinking level" }),
+      ),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const args = [
+        "agent",
+        "run",
+        "--role",
+        params.role,
+        "--prompt",
+        params.prompt,
+      ];
+      if (params.artifact) {
+        args.push("--artifact", params.artifact);
+      }
+      if (params.model) {
+        args.push("--model", params.model);
+      }
+      if (params.thinking) {
+        args.push("--thinking", params.thinking);
+      }
+      const result = await pi.exec("paj", args, { cwd: ctx.cwd });
+      if (result.code !== 0) {
+        throw new Error(
+          result.stderr.trim() || `paj exited with code ${result.code}`,
+        );
+      }
+      return {
+        content: [{ type: "text", text: result.stdout.trim() }],
+        details: { role: params.role, artifact: params.artifact },
+      };
     },
   });
 

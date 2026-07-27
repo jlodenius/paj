@@ -24,6 +24,25 @@ Incoming messages appear as user messages prefixed with the sender's name. Treat
 
 Do not assume a response is immediate. Continue independent work when possible and avoid repeatedly sending the same request.
 
+## Foreground Subagents
+
+Use the `run_subagent` tool for bounded review, research, diagnosis, or alternative-design work. Give it a complete task and tell it what evidence and output structure to return.
+
+Prefer an artifact path for substantial results:
+
+```text
+.agent/subagents/<topic>.md
+```
+
+Foreground subagents are read-only by default. Do not use them for implementation or ask multiple agents to edit the same worktree. Read the resulting artifact and verify important findings before acting on them.
+
+Use the CLI directly when needed:
+
+```sh
+paj agent run --role review --prompt "Review changes since origin/master" --artifact .agent/subagents/review.md
+paj agent run --role research --prompt-file prompt.md
+```
+
 ## Background Jobs
 
 Start commands through paj instead of raw background shell processes:

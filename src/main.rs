@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use paj::agents::{AgentRunRequest, AgentRunState, AgentRunner};
 use paj::jobs::{Job, JobManager};
 use paj::project::Project;
 use paj::registry::{Message, Registration, Registry, Session};
@@ -34,6 +35,10 @@ enum Commands {
     Job {
         #[command(subcommand)]
         command: JobCommands,
+    },
+    Agent {
+        #[command(subcommand)]
+        command: AgentCommands,
     },
     Gc {
         #[arg(long, default_value_t = 60)]
@@ -133,6 +138,30 @@ enum JobCommands {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum AgentCommands {
+    Run {
+        #[arg(long)]
+        role: String,
+        #[arg(long, conflicts_with = "prompt_file")]
+        prompt: Option<String>,
+        #[arg(long, conflicts_with = "prompt")]
+        prompt_file: Option<PathBuf>,
+        #[arg(long)]
+        artifact: Option<PathBuf>,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        #[arg(long)]
+        provider: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        thinking: Option<String>,
+        #[arg(long)]
+        allow_write: bool,
+    },
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let registry = Registry::from_environment()?;
@@ -143,6 +172,10 @@ fn main() -> Result<()> {
         Commands::Job { command } => {
             let manager = JobManager::from_environment()?;
             run_job_command(&manager, command, cli.json)
+        }
+        Commands::Agent { command } => {
+            let runner = AgentRunner::from_environment()?;
+            run_agent_command(&runner, command, cli.json)
         }
         Commands::Gc { stale_after } => {
             let removed = registry.gc(Duration::from_secs(stale_after))?;
@@ -240,6 +273,61 @@ fn run_message_command(registry: &Registry, command: MessageCommands, json: bool
         }
         MessageCommands::Ack { session, message } => {
             registry.acknowledge_message(session, message)?;
+            Ok(())
+        }
+    }
+}
+
+fn run_agent_command(runner: &AgentRunner, command: AgentCommands, json: bool) -> Result<()> {
+    match command {
+        AgentCommands::Run {
+            role,
+            prompt,
+            prompt_file,
+            artifact,
+            cwd,
+            provider,
+            model,
+            thinking,
+            allow_write,
+        } => {
+            let prompt = match (prompt, prompt_file) {
+                (Some(prompt), None) => prompt,
+                (None, Some(path)) => std::fs::read_to_string(path)?,
+                (None, None) => {
+                    return Err(anyhow::anyhow!("--prompt or --prompt-file is required"));
+                }
+                (Some(_), Some(_)) => unreachable!(),
+            };
+            let cwd = cwd.unwrap_or(env::current_dir()?).canonicalize()?;
+            let project = Project::discover(&cwd)?;
+            let run = runner.run(
+                &project,
+                AgentRunRequest {
+                    role,
+                    prompt,
+                    cwd,
+                    artifact_path: artifact,
+                    provider,
+                    model,
+                    thinking,
+                    allow_write,
+                },
+            )?;
+            if json {
+                print_json(&run)?;
+            } else if let Some(artifact) = &run.artifact_path {
+                println!("{}\t{}", run.id, artifact.display());
+            } else {
+                print!("{}", std::fs::read_to_string(&run.output_path)?);
+            }
+            if run.state == AgentRunState::Failed {
+                return Err(anyhow::anyhow!(
+                    "subagent failed with exit code {:?}; stderr: {}",
+                    run.exit_code,
+                    run.stderr_path.display()
+                ));
+            }
             Ok(())
         }
     }
