@@ -4,6 +4,8 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
+import { BridgeServer } from "./bridge.ts";
+
 interface PajMessage {
   id: string;
   from: {
@@ -22,6 +24,7 @@ interface PajSession {
   role: string;
   task?: string;
   status: string;
+  bridgeSocket?: string;
 }
 
 const COMMAND_TIMEOUT_MS = 5_000;
@@ -34,6 +37,7 @@ export default function pajExtension(pi: ExtensionAPI) {
   let heartbeatPending: Promise<void> | undefined;
   let messageTimer: ReturnType<typeof setInterval> | undefined;
   let messagePollPending: Promise<void> | undefined;
+  let bridge: BridgeServer | undefined;
 
   const execPaj = async (args: string[], cwd: string) => {
     const result = await pi.exec("paj", args, {
@@ -117,6 +121,14 @@ export default function pajExtension(pi: ExtensionAPI) {
       const output = await execPaj(args, ctx.cwd);
       const session = JSON.parse(output) as PajSession;
       activeSessionId = session.id;
+      if (!session.bridgeSocket) {
+        throw new Error("paj session did not advertise a bridge socket");
+      }
+      bridge = new BridgeServer({
+        isIdle: () => ctx.isIdle(),
+        sendPrompt: (text) => pi.sendUserMessage(text),
+      });
+      await bridge.start(session.bridgeSocket);
       heartbeatTimer = setInterval(() => {
         if (!activeSessionId || heartbeatPending) {
           return;
@@ -154,11 +166,35 @@ export default function pajExtension(pi: ExtensionAPI) {
       messageTimer = setInterval(poll, MESSAGE_POLL_INTERVAL_MS);
       poll();
     } catch (error) {
+      const failedBridge = bridge;
+      bridge = undefined;
+      if (failedBridge) {
+        await failedBridge.stop().catch(() => undefined);
+      }
+      const sessionId = activeSessionId;
+      activeSessionId = undefined;
+      if (sessionId) {
+        await execPaj(["session", "unregister", sessionId], ctx.cwd).catch(
+          () => undefined,
+        );
+      }
       if (ctx.hasUI) {
         ctx.ui.setStatus("paj", ctx.ui.theme.fg("error", "paj:disconnected"));
         ctx.ui.notify(`paj registration failed: ${String(error)}`, "error");
       }
     }
+  });
+
+  pi.on("message_update", async (event) => {
+    bridge?.onMessageUpdate(event);
+  });
+
+  pi.on("message_end", async (event) => {
+    bridge?.onMessageEnd(event);
+  });
+
+  pi.on("agent_settled", async () => {
+    bridge?.onAgentSettled();
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
@@ -171,6 +207,15 @@ export default function pajExtension(pi: ExtensionAPI) {
       messageTimer = undefined;
     }
     await Promise.all([heartbeatPending, messagePollPending]);
+    const activeBridge = bridge;
+    bridge = undefined;
+    if (activeBridge) {
+      try {
+        await activeBridge.stop();
+      } catch (error) {
+        console.error("paj bridge shutdown failed", error);
+      }
+    }
     const sessionId = activeSessionId;
     activeSessionId = undefined;
     if (sessionId) {

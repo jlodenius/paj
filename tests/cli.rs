@@ -35,6 +35,13 @@ fn register_outputs_session_as_json() {
         serde_json::from_slice(&output.stdout).expect("output should contain a session");
 
     assert_eq!(session.name, "primary");
+    assert_eq!(
+        session
+            .bridge_socket
+            .as_deref()
+            .and_then(|path| path.file_name()),
+        Some(std::ffi::OsStr::new("bridge.sock"))
+    );
 }
 
 #[test]

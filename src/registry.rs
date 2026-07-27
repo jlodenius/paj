@@ -28,6 +28,8 @@ pub struct Session {
     pub role: String,
     pub task: Option<String>,
     pub status: String,
+    #[serde(default)]
+    pub bridge_socket: Option<PathBuf>,
     pub started_at_ms: u64,
     pub last_heartbeat_ms: u64,
 }
@@ -105,10 +107,13 @@ impl Registry {
             role: registration.role,
             task: registration.task,
             status: "idle".to_owned(),
+            bridge_socket: None,
             started_at_ms: now,
             last_heartbeat_ms: now,
         };
         let session_dir = self.session_dir(&session.project_id, session.id);
+        let mut session = session;
+        session.bridge_socket = Some(session_dir.join("bridge.sock"));
         fs::create_dir_all(&session_dir)?;
         let lock = open_lock(&session_dir)?;
         lock.lock_exclusive()?;
@@ -278,7 +283,7 @@ impl Registry {
         Ok(removed)
     }
 
-    fn resolve_live_session(&self, reference: &str) -> Result<Session, RegistryError> {
+    pub fn resolve_live_session(&self, reference: &str) -> Result<Session, RegistryError> {
         let matches = self
             .list_live(None, Duration::from_secs(60))?
             .into_iter()
@@ -489,6 +494,26 @@ mod tests {
             .expect("session should be loaded");
 
         assert_eq!(loaded, registered);
+    }
+
+    #[test]
+    fn session_metadata_without_bridge_socket_remains_compatible() {
+        let directory = tempdir().expect("temporary directory should be created");
+        let registry =
+            Registry::new(directory.path().join("paj")).expect("registry should be created");
+        let registered = registry
+            .register(&project(), registration(std::process::id()))
+            .expect("session should be registered");
+        let mut metadata = serde_json::to_value(registered).expect("session should serialize");
+        metadata
+            .as_object_mut()
+            .expect("session should be an object")
+            .remove("bridgeSocket");
+
+        let session: super::Session =
+            serde_json::from_value(metadata).expect("old session metadata should load");
+
+        assert_eq!(session.bridge_socket, None);
     }
 
     #[test]

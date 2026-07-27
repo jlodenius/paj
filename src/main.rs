@@ -1,4 +1,5 @@
 use std::env;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -7,6 +8,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use paj::agents::{AgentRunRequest, AgentRunState, AgentRunner};
 use paj::background_agents::{BackgroundAgent, BackgroundAgentManager, SpawnRequest};
+use paj::bridge::{BridgeClient, BridgeEvent, bridge_is_available};
 use paj::jobs::{Job, JobManager};
 use paj::project::Project;
 use paj::registry::{Message, Registration, Registry, Session};
@@ -40,6 +42,10 @@ enum Commands {
     Agent {
         #[command(subcommand)]
         command: AgentCommands,
+    },
+    Bridge {
+        #[command(subcommand)]
+        command: BridgeCommands,
     },
     Gc {
         #[arg(long, default_value_t = 60)]
@@ -143,6 +149,31 @@ enum JobCommands {
 }
 
 #[derive(Debug, Subcommand)]
+enum BridgeCommands {
+    Status {
+        session: String,
+    },
+    Prompt {
+        session: String,
+        #[arg(long, conflicts_with = "prompt_file")]
+        prompt: Option<String>,
+        #[arg(long, conflicts_with = "prompt")]
+        prompt_file: Option<PathBuf>,
+        #[arg(long, default_value_t = 300)]
+        timeout: u64,
+    },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BridgeStatus {
+    session_id: Uuid,
+    session_name: String,
+    socket: Option<PathBuf>,
+    available: bool,
+}
+
+#[derive(Debug, Subcommand)]
 enum AgentCommands {
     Run {
         #[arg(long)]
@@ -210,6 +241,7 @@ fn main() -> Result<()> {
             run_job_command(&manager, command, cli.json)
         }
         Commands::Agent { command } => run_agent_command(command, cli.json),
+        Commands::Bridge { command } => run_bridge_command(&registry, command, cli.json),
         Commands::Gc { stale_after } => {
             let removed = registry.gc(Duration::from_secs(stale_after))?;
             print_sessions(&removed, cli.json, "No stale sessions found")
@@ -306,6 +338,74 @@ fn run_message_command(registry: &Registry, command: MessageCommands, json: bool
         }
         MessageCommands::Ack { session, message } => {
             registry.acknowledge_message(session, message)?;
+            Ok(())
+        }
+    }
+}
+
+fn run_bridge_command(registry: &Registry, command: BridgeCommands, json: bool) -> Result<()> {
+    match command {
+        BridgeCommands::Status { session } => {
+            let session = registry.resolve_live_session(&session)?;
+            let status = BridgeStatus {
+                session_id: session.id,
+                session_name: session.name.clone(),
+                socket: session.bridge_socket.clone(),
+                available: bridge_is_available(&session),
+            };
+            if json {
+                print_json(&status)
+            } else {
+                println!(
+                    "{}\t{}\t{}",
+                    status.session_name,
+                    if status.available {
+                        "available"
+                    } else {
+                        "unavailable"
+                    },
+                    status
+                        .socket
+                        .as_deref()
+                        .map_or_else(|| "-".to_owned(), |path| path.display().to_string())
+                );
+                Ok(())
+            }
+        }
+        BridgeCommands::Prompt {
+            session,
+            prompt,
+            prompt_file,
+            timeout,
+        } => {
+            let session = registry.resolve_live_session(&session)?;
+            let prompt = read_prompt(prompt, prompt_file)?;
+            let client = BridgeClient::new(Duration::from_secs(timeout));
+            let mut received_delta = false;
+            client.prompt(&session, &prompt, |event| {
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string(event).expect("bridge events should serialize")
+                    );
+                    return;
+                }
+                match event {
+                    BridgeEvent::Delta { text, .. } => {
+                        received_delta = true;
+                        print!("{text}");
+                        let _ = io::stdout().flush();
+                    }
+                    BridgeEvent::Complete { text, .. } => {
+                        if received_delta {
+                            println!();
+                        } else {
+                            println!("{text}");
+                        }
+                    }
+                    BridgeEvent::Accepted { .. } | BridgeEvent::Error { .. } => {}
+                }
+            })?;
             Ok(())
         }
     }

@@ -2,7 +2,7 @@
 
 `paj` is a local runtime and toolbox for the [Pi coding agent](https://github.com/badlogic/pi-mono). It will provide session discovery, agent messaging, observable background jobs, subagent orchestration, and editor integration.
 
-The current milestone implements the local session registry.
+Paj currently implements local orchestration and a Unix-socket bridge for external clients.
 
 ## Install
 
@@ -56,6 +56,18 @@ paj message ack <session-id> <message-id>
 ```
 
 Recipients can be addressed by exact name or session ID prefix. Messages remain pending until the recipient acknowledges them.
+
+## External session bridge
+
+Each live Pi session exposes a private Unix socket for structured external prompts:
+
+```sh
+paj bridge status agent-38ad3abf
+paj bridge prompt agent-38ad3abf --prompt "Explain this module"
+paj --json bridge prompt agent-38ad3abf --prompt-file request.md
+```
+
+Bridge requests emit `accepted`, `delta`, and `complete` JSON events. Only one bridge request can run per Pi session; requests are rejected with a `busy` error while Pi is working. Socket paths are advertised by the session registry and removed during clean shutdown or stale-session garbage collection.
 
 ## Background jobs
 
