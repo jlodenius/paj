@@ -140,7 +140,7 @@ export default function pajExtension(pi: ExtensionAPI) {
           return;
         }
         const lines = sessions.map((session) => {
-          const current = session.id === activeSessionId ? "*" : " ";
+          const current = session.pid === process.pid ? "*" : " ";
           const branch = session.branch ?? "no branch";
           const task = session.task ? ` — ${session.task}` : "";
           return `${current} ${session.name} [${session.role}/${session.status}] ${branch}${task}`;
