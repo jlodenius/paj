@@ -104,7 +104,7 @@ test("streams a correlated response without cancelling completed work", async ()
   );
 });
 
-test("cancels the Pi turn when an accepted client disconnects", async () => {
+test("cancels exactly once when an accepted client disconnects", async () => {
   let cancellations = 0;
   await withServer(
     actions({ cancelPrompt: () => cancellations++ }),
@@ -123,6 +123,7 @@ test("cancels the Pi turn when an accepted client disconnects", async () => {
       assert.equal(cancellations, 1);
     },
   );
+  assert.equal(cancellations, 1);
 });
 
 test("rejects null, arrays, malformed JSON, and malformed IDs without dispatch", async (t) => {
@@ -184,13 +185,71 @@ test("rejects oversized requests before dispatch", async () => {
   );
 });
 
-test("rejects requests while Pi is busy", async () => {
-  await withServer(actions({ isIdle: () => false }), async (socketPath) => {
-    const socket = await open(socketPath);
-    const eventsPromise = collect(socket);
-    socket.end(request() + "\n");
-    const [event] = await eventsPromise;
-    assert.equal(event.event, "error");
-    assert.equal(event.code, "busy");
-  });
+test("rejects requests while Pi is busy without cancelling", async () => {
+  let cancellations = 0;
+  await withServer(
+    actions({
+      isIdle: () => false,
+      cancelPrompt: () => cancellations++,
+    }),
+    async (socketPath) => {
+      const socket = await open(socketPath);
+      const eventsPromise = collect(socket);
+      socket.end(request() + "\n");
+      const [event] = await eventsPromise;
+      assert.equal(event.event, "error");
+      assert.equal(event.code, "busy");
+    },
+  );
+  assert.equal(cancellations, 0);
+});
+
+test("a rejected secondary client does not cancel the active request", async () => {
+  let cancellations = 0;
+  await withServer(
+    actions({ cancelPrompt: () => cancellations++ }),
+    async (socketPath, server) => {
+      const active = await open(socketPath);
+      const activeEvents = collect(active);
+      active.write(request() + "\n");
+      await new Promise<void>((resolve) =>
+        active.once("data", () => resolve()),
+      );
+
+      const secondary = await open(socketPath);
+      const secondaryEvents = collect(secondary);
+      secondary.end(
+        request({ id: "019faa4d-63ce-72a2-9d5a-c870d33ecfcb" }) + "\n",
+      );
+      const [rejection] = await secondaryEvents;
+      assert.equal(rejection.code, "busy");
+      assert.equal(cancellations, 0);
+
+      server.onAgentSettled();
+      const events = await activeEvents;
+      assert.equal(events.at(-1)?.event, "complete");
+    },
+  );
+  assert.equal(cancellations, 0);
+});
+
+test("server shutdown does not cancel an active request", async () => {
+  let cancellations = 0;
+  const directory = await mkdtemp(join(tmpdir(), "paj-bridge-test-"));
+  const socketPath = join(directory, "bridge.sock");
+  const server = new BridgeServer(
+    actions({ cancelPrompt: () => cancellations++ }),
+  );
+  await server.start(socketPath);
+  const socket = await open(socketPath);
+  const events = collect(socket);
+  socket.write(request() + "\n");
+  await new Promise<void>((resolve) => socket.once("data", () => resolve()));
+
+  await server.stop();
+  const response = await events;
+  await rm(directory, { recursive: true, force: true });
+
+  assert.equal(response.at(-1)?.code, "shutting_down");
+  assert.equal(cancellations, 0);
 });
