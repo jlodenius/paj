@@ -47,6 +47,7 @@ Use `--json` for structured output. Run `paj <command> --help` for complete opti
 | `paj bridge status <session>` | Check whether a session's external bridge is available |
 | `paj bridge prompt <session> --prompt <text>` | Send an external prompt |
 | `paj bridge prompt <session> --prompt-file <path>` | Send an external prompt from a file |
+| `paj bridge prompt <session> --prompt-stdin` | Read an external prompt from standard input |
 | `paj gc --stale-after <seconds>` | Remove stale session registrations |
 
 The Pi extension normally handles registration, heartbeats, message polling, acknowledgement, and unregistration automatically. Use those low-level commands for integrations, scripts, or explicit lifecycle diagnosis rather than ordinary agent communication.

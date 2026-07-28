@@ -1,5 +1,5 @@
 use std::env;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -27,18 +27,22 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// Register, inspect, and remove Pi sessions.
     Session {
         #[command(subcommand)]
         command: SessionCommands,
     },
+    /// Send and acknowledge messages between live agents.
     Message {
         #[command(subcommand)]
         command: MessageCommands,
     },
+    /// Inspect and prompt a Pi session's editor bridge.
     Bridge {
         #[command(subcommand)]
         command: BridgeCommands,
     },
+    /// Remove sessions whose heartbeat expired or process exited.
     Gc {
         #[arg(long, default_value_t = 60)]
         stale_after: u64,
@@ -47,6 +51,7 @@ enum Commands {
 
 #[derive(Debug, Subcommand)]
 enum SessionCommands {
+    /// Register a process as a Pi session in the current project.
     Register {
         #[arg(long)]
         pid: u32,
@@ -61,23 +66,22 @@ enum SessionCommands {
         #[arg(long)]
         cwd: Option<PathBuf>,
     },
-    Heartbeat {
-        id: Uuid,
-    },
-    Unregister {
-        id: Uuid,
-    },
+    /// Refresh a registered session's liveness timestamp.
+    Heartbeat { id: Uuid },
+    /// Remove a session and its pending messages from the registry.
+    Unregister { id: Uuid },
+    /// List live sessions in the current project or all projects.
     List {
         #[arg(long)]
         all: bool,
     },
-    Show {
-        id: Uuid,
-    },
+    /// Show all metadata for a registered session.
+    Show { id: Uuid },
 }
 
 #[derive(Debug, Subcommand)]
 enum MessageCommands {
+    /// Queue a message for a live agent by exact name or session ID prefix.
     Send {
         recipient: String,
         #[arg(long)]
@@ -85,26 +89,25 @@ enum MessageCommands {
         #[arg(long)]
         text: String,
     },
-    Pending {
-        session: Uuid,
-    },
-    Ack {
-        session: Uuid,
-        message: Uuid,
-    },
+    /// List messages awaiting acknowledgement by a session.
+    Pending { session: Uuid },
+    /// Acknowledge and remove a pending message.
+    Ack { session: Uuid, message: Uuid },
 }
 
 #[derive(Debug, Subcommand)]
 enum BridgeCommands {
-    Status {
-        session: String,
-    },
+    /// Check whether a session advertises a reachable bridge socket.
+    Status { session: String },
+    /// Send a prompt and stream bridge events until completion.
     Prompt {
         session: String,
-        #[arg(long, conflicts_with = "prompt_file")]
+        #[arg(long, conflicts_with_all = ["prompt_file", "prompt_stdin"])]
         prompt: Option<String>,
-        #[arg(long, conflicts_with = "prompt")]
+        #[arg(long, conflicts_with_all = ["prompt", "prompt_stdin"])]
         prompt_file: Option<PathBuf>,
+        #[arg(long, conflicts_with_all = ["prompt", "prompt_file"])]
+        prompt_stdin: bool,
         #[arg(long, default_value_t = 300)]
         timeout: u64,
     },
@@ -261,10 +264,11 @@ fn run_bridge_command(registry: &Registry, command: BridgeCommands, json: bool) 
             session,
             prompt,
             prompt_file,
+            prompt_stdin,
             timeout,
         } => {
             let session = registry.resolve_live_session(&session)?;
-            let prompt = read_prompt(prompt, prompt_file)?;
+            let prompt = read_prompt(prompt, prompt_file, prompt_stdin, io::stdin().lock())?;
             let client = BridgeClient::new(Duration::from_secs(timeout));
             let mut received_delta = false;
             client.prompt(&session, &prompt, |event| {
@@ -296,12 +300,24 @@ fn run_bridge_command(registry: &Registry, command: BridgeCommands, json: bool) 
     }
 }
 
-fn read_prompt(prompt: Option<String>, prompt_file: Option<PathBuf>) -> Result<String> {
-    match (prompt, prompt_file) {
-        (Some(prompt), None) => Ok(prompt),
-        (None, Some(path)) => Ok(std::fs::read_to_string(path)?),
-        (None, None) => Err(anyhow::anyhow!("--prompt or --prompt-file is required")),
-        (Some(_), Some(_)) => unreachable!(),
+fn read_prompt(
+    prompt: Option<String>,
+    prompt_file: Option<PathBuf>,
+    prompt_stdin: bool,
+    mut stdin: impl Read,
+) -> Result<String> {
+    match (prompt, prompt_file, prompt_stdin) {
+        (Some(prompt), None, false) => Ok(prompt),
+        (None, Some(path), false) => Ok(std::fs::read_to_string(path)?),
+        (None, None, true) => {
+            let mut prompt = String::new();
+            stdin.read_to_string(&mut prompt)?;
+            Ok(prompt)
+        }
+        (None, None, false) => Err(anyhow::anyhow!(
+            "--prompt, --prompt-file, or --prompt-stdin is required"
+        )),
+        _ => unreachable!("clap prevents conflicting prompt sources"),
     }
 }
 
@@ -367,4 +383,36 @@ fn print_session(session: &Session) {
 fn print_json(value: &(impl Serialize + ?Sized)) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use clap::Parser;
+
+    use super::{Cli, read_prompt};
+
+    #[test]
+    fn prompt_can_be_read_from_stdin() {
+        let prompt = read_prompt(None, None, true, Cursor::new("from stdin"))
+            .expect("stdin prompt should be read");
+
+        assert_eq!(prompt, "from stdin");
+    }
+
+    #[test]
+    fn clap_rejects_multiple_prompt_sources() {
+        let result = Cli::try_parse_from([
+            "paj",
+            "bridge",
+            "prompt",
+            "primary",
+            "--prompt",
+            "one",
+            "--prompt-stdin",
+        ]);
+
+        assert!(result.is_err());
+    }
 }

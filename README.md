@@ -4,17 +4,21 @@
 
 ## Install
 
-With Nix:
+The CLI and the Pi integration are installed separately. These commands install only the `paj` binary:
 
 ```sh
 nix profile install github:jlodenius/paj
-```
-
-From a source checkout:
-
-```sh
+# or, from a source checkout
 cargo install --path .
 ```
+
+For the full setup, also install the Pi package, which loads this repository's extension and skill:
+
+```sh
+pi install git:github.com/jlodenius/paj
+```
+
+Alternatively, link `extensions/paj` and `skills/paj` into `~/.pi/agent/extensions/paj` and `~/.pi/agent/skills/paj`. From a checkout, `pi -e .` loads the package temporarily. Every option still requires the `paj` binary on `PATH`.
 
 ## Session discovery
 
@@ -69,19 +73,14 @@ Each live Pi session exposes a private Unix socket for structured prompts from N
 paj bridge status agent-38ad3abf
 paj bridge prompt agent-38ad3abf --prompt "Explain this module"
 paj --json bridge prompt agent-38ad3abf --prompt-file request.md
+printf '%s' "Review this change" | paj bridge prompt agent-38ad3abf --prompt-stdin
 ```
 
-Bridge requests emit `accepted`, `delta`, and `complete` JSON events. Only one request can run per Pi session; requests are rejected with a `busy` error while Pi is working. Socket paths are advertised by the session registry and removed during clean shutdown or stale-session garbage collection.
+Bridge requests emit `accepted`, `delta`, and `complete` JSON events. Only one request can run per Pi session; requests are rejected with a `busy` error while Pi is working. If a bridge client disconnects after acceptance, the extension cancels the Pi turn that it started. Socket paths are advertised by the session registry and removed during clean shutdown or stale-session garbage collection.
 
 ## Pi extension
 
 The extension in `extensions/paj` registers sessions, maintains their lifecycle, delivers messages, hosts the bridge, and exposes the commands and tool described above.
-
-Test it directly from this repository:
-
-```sh
-pi -e ./extensions/paj
-```
 
 The `paj` executable must be available on `PATH` before loading the extension.
 
@@ -91,5 +90,6 @@ The `paj` executable must be available on `PATH` before loading the extension.
 cargo fmt --check
 cargo test --locked
 cargo clippy --all-targets --all-features --locked -- -D warnings
+npm test
 ./tests/lifecycle-recovery.sh
 ```

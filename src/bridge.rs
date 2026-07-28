@@ -213,14 +213,13 @@ mod tests {
     use std::os::unix::net::UnixListener;
     use std::thread;
 
-    use tempfile::tempdir;
+    use tempfile::{TempDir, tempdir};
 
-    use super::{BridgeClient, BridgeEvent};
+    use super::{BridgeClient, BridgeError, BridgeEvent};
     use crate::project::Project;
-    use crate::registry::{Registration, Registry};
+    use crate::registry::{Registration, Registry, Session};
 
-    #[test]
-    fn prompt_streams_correlated_events_until_completion() {
+    fn registered_bridge() -> (TempDir, Session, UnixListener) {
         let directory = tempdir().expect("temporary directory should be created");
         let registry =
             Registry::new(directory.path().join("paj")).expect("registry should be created");
@@ -247,6 +246,16 @@ mod tests {
             .clone()
             .expect("session should advertise a socket");
         let listener = UnixListener::bind(&socket).expect("listener should bind");
+        (directory, session, listener)
+    }
+
+    #[test]
+    fn prompt_streams_correlated_events_until_completion() {
+        let (_directory, session, listener) = registered_bridge();
+        let socket = session
+            .bridge_socket
+            .clone()
+            .expect("session should advertise a socket");
         assert!(
             socket
                 .symlink_metadata()
@@ -284,5 +293,55 @@ mod tests {
             BridgeEvent::Delta { text, .. },
             BridgeEvent::Complete { .. }
         ] if text == "hel"));
+    }
+
+    #[test]
+    fn prompt_rejects_an_event_for_a_different_request() {
+        let (_directory, session, listener) = registered_bridge();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("client should connect");
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().expect("stream should clone"))
+                .read_line(&mut request)
+                .expect("request should be read");
+            let other_id = uuid::Uuid::now_v7();
+            writeln!(
+                stream,
+                "{{\"event\":\"accepted\",\"version\":1,\"id\":\"{other_id}\"}}"
+            )
+            .expect("event should be written");
+        });
+
+        let result =
+            BridgeClient::new(std::time::Duration::from_secs(1)).prompt(&session, "hello", |_| {});
+        server.join().expect("server should stop");
+
+        assert!(matches!(result, Err(BridgeError::RequestIdMismatch)));
+    }
+
+    #[test]
+    fn prompt_rejects_output_before_acceptance() {
+        let (_directory, session, listener) = registered_bridge();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("client should connect");
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().expect("stream should clone"))
+                .read_line(&mut request)
+                .expect("request should be read");
+            let request: serde_json::Value =
+                serde_json::from_str(&request).expect("request should be JSON");
+            let id = request["id"].as_str().expect("request should have an ID");
+            writeln!(
+                stream,
+                "{{\"event\":\"delta\",\"version\":1,\"id\":\"{id}\",\"text\":\"early\"}}"
+            )
+            .expect("event should be written");
+        });
+
+        let result =
+            BridgeClient::new(std::time::Duration::from_secs(1)).prompt(&session, "hello", |_| {});
+        server.join().expect("server should stop");
+
+        assert!(matches!(result, Err(BridgeError::EventBeforeAcceptance)));
     }
 }

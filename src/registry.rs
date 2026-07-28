@@ -662,6 +662,80 @@ mod tests {
     }
 
     #[test]
+    fn send_message_resolves_recipient_by_session_id_prefix() {
+        let directory = tempdir().expect("temporary directory should be created");
+        let registry =
+            Registry::new(directory.path().join("paj")).expect("registry should be created");
+        let sender = registry
+            .register(&project(), registration(std::process::id()))
+            .expect("sender should be registered");
+        let mut recipient_registration = registration(std::process::id());
+        recipient_registration.name = Some("recipient".to_owned());
+        let recipient = registry
+            .register(&project(), recipient_registration)
+            .expect("recipient should be registered");
+        let reference = &recipient.id.to_string()[..35];
+
+        let message = registry
+            .send_message(sender.id, reference, "hello".to_owned())
+            .expect("recipient prefix should resolve");
+
+        assert_eq!(message.to, recipient.id);
+    }
+
+    #[test]
+    fn send_message_rejects_ambiguous_recipient_name() {
+        let directory = tempdir().expect("temporary directory should be created");
+        let registry =
+            Registry::new(directory.path().join("paj")).expect("registry should be created");
+        let sender = registry
+            .register(&project(), registration(std::process::id()))
+            .expect("sender should be registered");
+        for _ in 0..2 {
+            let mut recipient_registration = registration(std::process::id());
+            recipient_registration.name = Some("duplicate".to_owned());
+            registry
+                .register(&project(), recipient_registration)
+                .expect("recipient should be registered");
+        }
+
+        let result = registry.send_message(sender.id, "duplicate", "hello".to_owned());
+
+        assert!(matches!(result, Err(RegistryError::AmbiguousRecipient(_))));
+    }
+
+    #[test]
+    fn acknowledge_message_cannot_remove_another_sessions_message() {
+        let directory = tempdir().expect("temporary directory should be created");
+        let registry =
+            Registry::new(directory.path().join("paj")).expect("registry should be created");
+        let sender = registry
+            .register(&project(), registration(std::process::id()))
+            .expect("sender should be registered");
+        let mut recipient_registration = registration(std::process::id());
+        recipient_registration.name = Some("recipient".to_owned());
+        let recipient = registry
+            .register(&project(), recipient_registration)
+            .expect("recipient should be registered");
+        let other = registry
+            .register(&project(), registration(std::process::id()))
+            .expect("other session should be registered");
+        let message = registry
+            .send_message(sender.id, "recipient", "hello".to_owned())
+            .expect("message should be sent");
+
+        let result = registry.acknowledge_message(other.id, message.id);
+
+        assert!(matches!(result, Err(RegistryError::MessageNotFound(_))));
+        assert_eq!(
+            registry
+                .pending_messages(recipient.id)
+                .expect("recipient inbox should load"),
+            vec![message]
+        );
+    }
+
+    #[test]
     fn gc_removes_session_with_dead_process() {
         let directory = tempdir().expect("temporary directory should be created");
         let registry =
