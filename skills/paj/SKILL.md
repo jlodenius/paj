@@ -13,7 +13,7 @@ Discover agents before sending when the recipient is unclear. Do not guess which
 
 ## Send Messages
 
-Use `send_agent_message` with the recipient's exact name or session ID.
+Inside Pi, use the extension-provided `send_agent_message` tool with the recipient's exact name or session ID. It is not a CLI command: it supplies the current session as the sender automatically. Shell scripts and external programs should use `paj message send` instead.
 
 Include:
 
