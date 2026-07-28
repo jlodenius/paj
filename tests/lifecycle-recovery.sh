@@ -3,18 +3,26 @@ set -euo pipefail
 
 root=$(git rev-parse --show-toplevel)
 name="lifecycle-recovery-$$"
+runtime=$(mktemp -d)
+log="$runtime/pi.log"
+mkfifo "$runtime/input"
+exec 3<>"$runtime/input"
+pid=
 
 cleanup() {
-  paj job interrupt "$name" >/dev/null 2>&1 || true
-  sleep 0.2
-  paj job remove "$name" >/dev/null 2>&1 || true
+  if [[ -n "$pid" ]]; then
+    kill "$pid" >/dev/null 2>&1 || true
+    wait "$pid" >/dev/null 2>&1 || true
+  fi
+  exec 3>&-
+  rm -rf "$runtime"
 }
 trap cleanup EXIT
 
-paj job start --name "$name" --cwd "$root" -- \
-  env PAJ_AGENT_NAME="$name" \
+env PAJ_AGENT_NAME="$name" \
   pi --mode rpc --no-session --offline --no-extensions -e "$root/extensions/paj" \
-  >/dev/null
+  <&3 >"$log" 2>&1 &
+pid=$!
 sleep 2
 
 old_id=$(paj --json session list | jq -er --arg name "$name" '.[] | select(.name == $name) | .id')
@@ -27,7 +35,7 @@ socket=$(jq -er .bridgeSocket <<<"$session")
 
 test "$new_id" != "$old_id"
 test -S "$socket"
-if paj job log "$name" --lines 200 | grep -q 'message poll failed.*was not found'; then
+if grep -q 'message poll failed.*was not found' "$log"; then
   echo "message polling continued after registration loss" >&2
   exit 1
 fi

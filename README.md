@@ -1,8 +1,6 @@
 # paj
 
-`paj` is a local runtime and toolbox for the [Pi coding agent](https://github.com/badlogic/pi-mono). It will provide session discovery, agent messaging, observable background jobs, subagent orchestration, and editor integration.
-
-Paj currently implements local orchestration and a Unix-socket bridge for external clients.
+`paj` provides local session discovery, agent-to-agent messaging, and an editor bridge for the [Pi coding agent](https://github.com/badlogic/pi-mono).
 
 ## Install
 
@@ -18,34 +16,31 @@ From a source checkout:
 cargo install --path .
 ```
 
-## Session registry
+## Session discovery
 
-Register a process as a session:
-
-```sh
-paj session register --pid "$PID" --name primary --task "Implement session discovery"
-```
-
-The command prints the session ID and generated or supplied name. Pass `--json` for structured output:
-
-```sh
-paj --json session register --pid "$PID"
-```
-
-Inspect and update sessions:
+Pi sessions using the Paj extension register automatically. List live sessions in the current project or across all projects:
 
 ```sh
 paj session list
 paj session list --all
 paj session show <session-id>
-paj session heartbeat <session-id>
-paj session unregister <session-id>
+```
+
+The extension sends heartbeats, recovers lost registrations, and unregisters during clean shutdown. Remove stale registrations with:
+
+```sh
 paj gc --stale-after 60
 ```
 
-Commands use `$XDG_RUNTIME_DIR/paj`. Set `PAJ_RUNTIME_DIR` to override the runtime root, primarily for testing.
+For integrations and lifecycle testing, sessions can also be managed directly:
 
-A session is stale when its heartbeat exceeds the configured threshold or its process no longer exists. Runtime data is private to the current user and is removed naturally when the user runtime directory is cleared.
+```sh
+paj session register --pid "$PID" --name primary
+paj session heartbeat <session-id>
+paj session unregister <session-id>
+```
+
+Commands use `$XDG_RUNTIME_DIR/paj`. Set `PAJ_RUNTIME_DIR` to override the runtime root, primarily for testing.
 
 ## Agent messaging
 
@@ -55,11 +50,20 @@ paj --json message pending <session-id>
 paj message ack <session-id> <message-id>
 ```
 
-Recipients can be addressed by exact name or session ID prefix. Messages remain pending until the recipient acknowledges them.
+Recipients can be addressed by exact name or session ID prefix. Messages remain pending until acknowledged.
 
-## External session bridge
+The Pi extension provides:
 
-Each live Pi session exposes a private Unix socket for structured external prompts:
+```text
+/agents [all]
+/agent-send <agent> <message>
+```
+
+Agents can send messages through the `send_agent_message` tool. Incoming messages are delivered as user messages and queued as follow-ups while the recipient is busy.
+
+## Editor and external-client bridge
+
+Each live Pi session exposes a private Unix socket for structured prompts from Neovim and other local clients:
 
 ```sh
 paj bridge status agent-38ad3abf
@@ -67,71 +71,11 @@ paj bridge prompt agent-38ad3abf --prompt "Explain this module"
 paj --json bridge prompt agent-38ad3abf --prompt-file request.md
 ```
 
-Bridge requests emit `accepted`, `delta`, and `complete` JSON events. Only one bridge request can run per Pi session; requests are rejected with a `busy` error while Pi is working. Socket paths are advertised by the session registry and removed during clean shutdown or stale-session garbage collection.
-
-## Background jobs
-
-Jobs run in a dedicated tmux server and retain their pane after exit for inspection:
-
-```sh
-paj job start --name dev-server -- npm run dev
-paj job list
-paj job status dev-server
-paj job log dev-server --lines 200
-paj job log dev-server --follow
-paj job send dev-server "r"
-paj job interrupt dev-server
-paj job stop dev-server
-paj job remove dev-server
-paj job attach dev-server
-```
-
-Job output and metadata live under the Paj runtime directory. Commands are passed directly to tmux without shell interpolation.
-
-## Foreground subagents
-
-Run a clean Pi process for bounded specialist work:
-
-```sh
-paj agent run \
-  --role review \
-  --prompt "Review changes since origin/master" \
-  --artifact .agent/subagents/review.md
-```
-
-Prompts can also come from `--prompt-file`. `--provider`, `--model`, and `--thinking` select the model configuration. Subagents are instructed to work read-only and receive only the `read` and `bash` tools unless `--allow-write` is explicitly passed.
-
-Paj records the effective prompt, output, stderr, metadata, timing, and exit status under its runtime directory. When an artifact is requested, the CLI prints only the run ID and artifact path.
-
-## Background implementation agents
-
-Spawn an interactive Pi session in an isolated Git worktree:
-
-```sh
-paj agent spawn \
-  --branch feature/parser \
-  --prompt-file .agent/handoffs/parser.md
-
-paj agent list
-paj agent attach implementation-12345678
-paj agent stop implementation-12345678
-paj agent remove implementation-12345678
-```
-
-Automatic worktrees live under `$XDG_STATE_HOME/paj/worktrees` so they survive logout and runtime cleanup. Existing branches are reused when available; otherwise Paj creates the requested branch from `HEAD`. `remove` preserves dirty worktrees unless `--force` is passed and never deletes the branch.
-
-The `spawn_implementation_agent` tool sets the current Pi session as the parent. The child is instructed to commit coherent changes and send its parent a completion message.
+Bridge requests emit `accepted`, `delta`, and `complete` JSON events. Only one request can run per Pi session; requests are rejected with a `busy` error while Pi is working. Socket paths are advertised by the session registry and removed during clean shutdown or stale-session garbage collection.
 
 ## Pi extension
 
-The extension in `extensions/paj` registers each Pi session automatically, sends a heartbeat every ten seconds, recovers deleted runtime registrations with exponential backoff, unregisters during clean shutdown, and provides:
-
-```text
-/agents [all]
-/agent-send <agent> <message>
-```
-
-Agents can send messages through the `send_agent_message` tool. Incoming messages are delivered as user messages and queued as follow-ups when the recipient is busy.
+The extension in `extensions/paj` registers sessions, maintains their lifecycle, delivers messages, hosts the bridge, and exposes the commands and tool described above.
 
 Test it directly from this repository:
 
@@ -139,7 +83,7 @@ Test it directly from this repository:
 pi -e ./extensions/paj
 ```
 
-The executable must be available on `PATH` before loading the extension.
+The `paj` executable must be available on `PATH` before loading the extension.
 
 ## Development
 

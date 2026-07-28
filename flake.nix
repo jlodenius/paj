@@ -1,5 +1,5 @@
 {
-  description = "Local runtime and toolbox for the Pi coding agent";
+  description = "Local session discovery, messaging, and editor bridge for Pi coding agents";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -22,18 +22,8 @@
 
         cargoLock.lockFile = ./Cargo.lock;
 
-        nativeBuildInputs = [pkgs.makeWrapper];
-        nativeCheckInputs = [pkgs.coreutils pkgs.tmux];
-        preCheck = ''
-          export PAJ_SKIP_TMUX_TESTS=1
-        '';
-        postInstall = ''
-          wrapProgram $out/bin/paj \
-            --prefix PATH : ${pkgs.lib.makeBinPath [pkgs.coreutils pkgs.tmux]}
-        '';
-
         meta = {
-          description = "Local runtime and toolbox for the Pi coding agent";
+          description = "Local session discovery, messaging, and editor bridge for Pi coding agents";
           homepage = "https://github.com/jlodenius/paj";
           mainProgram = "paj";
           platforms = pkgs.lib.platforms.linux;

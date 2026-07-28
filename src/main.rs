@@ -6,17 +6,17 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use paj::agents::{AgentRunRequest, AgentRunState, AgentRunner};
-use paj::background_agents::{BackgroundAgent, BackgroundAgentManager, SpawnRequest};
 use paj::bridge::{BridgeClient, BridgeEvent, bridge_is_available};
-use paj::jobs::{Job, JobManager};
 use paj::project::Project;
 use paj::registry::{Message, Registration, Registry, Session};
 use serde::Serialize;
 use uuid::Uuid;
 
 #[derive(Debug, Parser)]
-#[command(version, about = "Local runtime and toolbox for the Pi coding agent")]
+#[command(
+    version,
+    about = "Local session discovery, messaging, and editor bridge for Pi coding agents"
+)]
 struct Cli {
     #[arg(long, global = true)]
     json: bool,
@@ -34,14 +34,6 @@ enum Commands {
     Message {
         #[command(subcommand)]
         command: MessageCommands,
-    },
-    Job {
-        #[command(subcommand)]
-        command: JobCommands,
-    },
-    Agent {
-        #[command(subcommand)]
-        command: AgentCommands,
     },
     Bridge {
         #[command(subcommand)]
@@ -103,52 +95,6 @@ enum MessageCommands {
 }
 
 #[derive(Debug, Subcommand)]
-enum JobCommands {
-    Start {
-        #[arg(long)]
-        name: String,
-        #[arg(long)]
-        owner: Option<Uuid>,
-        #[arg(long)]
-        cwd: Option<PathBuf>,
-        #[arg(last = true, required = true)]
-        command: Vec<String>,
-    },
-    List {
-        #[arg(long)]
-        all: bool,
-    },
-    Status {
-        job: String,
-    },
-    Log {
-        job: String,
-        #[arg(long, default_value_t = 200)]
-        lines: usize,
-        #[arg(long)]
-        follow: bool,
-    },
-    Send {
-        job: String,
-        input: String,
-        #[arg(long)]
-        no_enter: bool,
-    },
-    Interrupt {
-        job: String,
-    },
-    Stop {
-        job: String,
-    },
-    Remove {
-        job: String,
-    },
-    Attach {
-        job: String,
-    },
-}
-
-#[derive(Debug, Subcommand)]
 enum BridgeCommands {
     Status {
         session: String,
@@ -173,62 +119,6 @@ struct BridgeStatus {
     available: bool,
 }
 
-#[derive(Debug, Subcommand)]
-enum AgentCommands {
-    Run {
-        #[arg(long)]
-        role: String,
-        #[arg(long, conflicts_with = "prompt_file")]
-        prompt: Option<String>,
-        #[arg(long, conflicts_with = "prompt")]
-        prompt_file: Option<PathBuf>,
-        #[arg(long)]
-        artifact: Option<PathBuf>,
-        #[arg(long)]
-        cwd: Option<PathBuf>,
-        #[arg(long)]
-        provider: Option<String>,
-        #[arg(long)]
-        model: Option<String>,
-        #[arg(long)]
-        thinking: Option<String>,
-        #[arg(long)]
-        allow_write: bool,
-    },
-    Spawn {
-        #[arg(long)]
-        branch: String,
-        #[arg(long)]
-        name: Option<String>,
-        #[arg(long, default_value = "implementation")]
-        role: String,
-        #[arg(long)]
-        parent: Option<Uuid>,
-        #[arg(long)]
-        worktree: Option<PathBuf>,
-        #[arg(long, conflicts_with = "prompt_file")]
-        prompt: Option<String>,
-        #[arg(long, conflicts_with = "prompt")]
-        prompt_file: Option<PathBuf>,
-        #[arg(long)]
-        model: Option<String>,
-        #[arg(long)]
-        thinking: Option<String>,
-    },
-    List,
-    Stop {
-        agent: String,
-    },
-    Attach {
-        agent: String,
-    },
-    Remove {
-        agent: String,
-        #[arg(long)]
-        force: bool,
-    },
-}
-
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let registry = Registry::from_environment()?;
@@ -236,11 +126,6 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Session { command } => run_session_command(&registry, command, cli.json),
         Commands::Message { command } => run_message_command(&registry, command, cli.json),
-        Commands::Job { command } => {
-            let manager = JobManager::from_environment()?;
-            run_job_command(&manager, command, cli.json)
-        }
-        Commands::Agent { command } => run_agent_command(command, cli.json),
         Commands::Bridge { command } => run_bridge_command(&registry, command, cli.json),
         Commands::Gc { stale_after } => {
             let removed = registry.gc(Duration::from_secs(stale_after))?;
@@ -411,218 +296,12 @@ fn run_bridge_command(registry: &Registry, command: BridgeCommands, json: bool) 
     }
 }
 
-fn run_agent_command(command: AgentCommands, json: bool) -> Result<()> {
-    match command {
-        AgentCommands::Run {
-            role,
-            prompt,
-            prompt_file,
-            artifact,
-            cwd,
-            provider,
-            model,
-            thinking,
-            allow_write,
-        } => {
-            let prompt = read_prompt(prompt, prompt_file)?;
-            let cwd = cwd.unwrap_or(env::current_dir()?).canonicalize()?;
-            let project = Project::discover(&cwd)?;
-            let runner = AgentRunner::from_environment()?;
-            let run = runner.run(
-                &project,
-                AgentRunRequest {
-                    role,
-                    prompt,
-                    cwd,
-                    artifact_path: artifact,
-                    provider,
-                    model,
-                    thinking,
-                    allow_write,
-                },
-            )?;
-            if json {
-                print_json(&run)?;
-            } else if let Some(artifact) = &run.artifact_path {
-                println!("{}\t{}", run.id, artifact.display());
-            } else {
-                print!("{}", std::fs::read_to_string(&run.output_path)?);
-            }
-            if run.state == AgentRunState::Failed {
-                return Err(anyhow::anyhow!(
-                    "subagent failed with exit code {:?}; stderr: {}",
-                    run.exit_code,
-                    run.stderr_path.display()
-                ));
-            }
-            Ok(())
-        }
-        AgentCommands::Spawn {
-            branch,
-            name,
-            role,
-            parent,
-            worktree,
-            prompt,
-            prompt_file,
-            model,
-            thinking,
-        } => {
-            let prompt = read_prompt(prompt, prompt_file)?;
-            let project = Project::discover(&env::current_dir()?)?;
-            let manager = BackgroundAgentManager::from_environment()?;
-            let agent = manager.spawn(
-                &project,
-                SpawnRequest {
-                    name,
-                    role,
-                    parent_session_id: parent,
-                    branch,
-                    worktree,
-                    prompt,
-                    model,
-                    thinking,
-                },
-            )?;
-            if json {
-                print_json(&agent)
-            } else {
-                println!(
-                    "{}\t{}\t{}\t{}",
-                    agent.id,
-                    agent.name,
-                    agent.branch,
-                    agent.worktree.display()
-                );
-                Ok(())
-            }
-        }
-        AgentCommands::List => {
-            let project = Project::discover(&env::current_dir()?)?;
-            let manager = BackgroundAgentManager::from_environment()?;
-            let agents = manager.list(&project.id)?;
-            if json {
-                print_json(&agents)
-            } else {
-                print_background_agents(&agents);
-                Ok(())
-            }
-        }
-        AgentCommands::Stop { agent } => {
-            let project = Project::discover(&env::current_dir()?)?;
-            let manager = BackgroundAgentManager::from_environment()?;
-            let agent = manager.resolve(&project.id, &agent)?;
-            manager.stop(&agent)?;
-            Ok(())
-        }
-        AgentCommands::Attach { agent } => {
-            let project = Project::discover(&env::current_dir()?)?;
-            let manager = BackgroundAgentManager::from_environment()?;
-            let agent = manager.resolve(&project.id, &agent)?;
-            manager.attach(&agent)?;
-            Ok(())
-        }
-        AgentCommands::Remove { agent, force } => {
-            let project = Project::discover(&env::current_dir()?)?;
-            let manager = BackgroundAgentManager::from_environment()?;
-            let agent = manager.resolve(&project.id, &agent)?;
-            manager.remove(&agent, force)?;
-            Ok(())
-        }
-    }
-}
-
 fn read_prompt(prompt: Option<String>, prompt_file: Option<PathBuf>) -> Result<String> {
     match (prompt, prompt_file) {
         (Some(prompt), None) => Ok(prompt),
         (None, Some(path)) => Ok(std::fs::read_to_string(path)?),
         (None, None) => Err(anyhow::anyhow!("--prompt or --prompt-file is required")),
         (Some(_), Some(_)) => unreachable!(),
-    }
-}
-
-fn run_job_command(manager: &JobManager, command: JobCommands, json: bool) -> Result<()> {
-    let current_dir = env::current_dir()?;
-    let project = Project::discover(&current_dir)?;
-    match command {
-        JobCommands::Start {
-            name,
-            owner,
-            cwd,
-            command,
-        } => {
-            let cwd = cwd.unwrap_or(current_dir).canonicalize()?;
-            let job = manager.start(&project, name, owner, cwd, command)?;
-            if json {
-                print_json(&job)
-            } else {
-                println!("{}\t{}", job.id, job.name);
-                Ok(())
-            }
-        }
-        JobCommands::List { all } => {
-            let jobs = manager.list((!all).then_some(project.id.as_str()))?;
-            if json {
-                print_json(&jobs)
-            } else {
-                print_jobs(&jobs);
-                Ok(())
-            }
-        }
-        JobCommands::Status { job } => {
-            let job = manager.resolve(&project.id, &job)?;
-            if json {
-                print_json(&job)
-            } else {
-                print_jobs(&[job]);
-                Ok(())
-            }
-        }
-        JobCommands::Log { job, lines, follow } => {
-            let job = manager.resolve(&project.id, &job)?;
-            let mut tail = Command::new("tail");
-            if follow {
-                tail.arg("-f");
-            }
-            let status = tail
-                .args(["-n", &lines.to_string()])
-                .arg(manager.log_path(&job))
-                .status()?;
-            if status.success() {
-                Ok(())
-            } else {
-                Err(anyhow::anyhow!("tail exited with {status}"))
-            }
-        }
-        JobCommands::Send {
-            job,
-            input,
-            no_enter,
-        } => {
-            let job = manager.resolve(&project.id, &job)?;
-            manager.send(&job, &input, !no_enter)?;
-            Ok(())
-        }
-        JobCommands::Interrupt { job } => {
-            let job = manager.resolve(&project.id, &job)?;
-            manager.interrupt(&job)?;
-            Ok(())
-        }
-        JobCommands::Stop { job } => {
-            let job = manager.resolve(&project.id, &job)?;
-            let stopped = manager.stop(&job)?;
-            if json { print_json(&stopped) } else { Ok(()) }
-        }
-        JobCommands::Remove { job } => {
-            let job = manager.resolve(&project.id, &job)?;
-            manager.remove(&job)?;
-            Ok(())
-        }
-        JobCommands::Attach { job } => {
-            let job = manager.resolve(&project.id, &job)?;
-            manager.attach(&job)?;
-            Ok(())
-        }
     }
 }
 
@@ -661,31 +340,6 @@ fn print_sessions(sessions: &[Session], json: bool, empty_message: &str) -> Resu
         );
     }
     Ok(())
-}
-
-fn print_background_agents(agents: &[BackgroundAgent]) {
-    for agent in agents {
-        println!(
-            "{}\t{}\t{:?}\t{}\t{}",
-            agent.id,
-            agent.name,
-            agent.state,
-            agent.branch,
-            agent.worktree.display()
-        );
-    }
-}
-
-fn print_jobs(jobs: &[Job]) {
-    for job in jobs {
-        println!(
-            "{}\t{}\t{:?}\t{}",
-            job.id,
-            job.name,
-            job.state,
-            job.command.join(" ")
-        );
-    }
 }
 
 fn print_messages(messages: &[Message]) {
