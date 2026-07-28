@@ -124,7 +124,7 @@ The `spawn_implementation_agent` tool sets the current Pi session as the parent.
 
 ## Pi extension
 
-The extension in `extensions/paj` registers each Pi session automatically, sends a heartbeat every ten seconds, unregisters during clean shutdown, and provides:
+The extension in `extensions/paj` registers each Pi session automatically, sends a heartbeat every ten seconds, recovers deleted runtime registrations with exponential backoff, unregisters during clean shutdown, and provides:
 
 ```text
 /agents [all]
@@ -147,4 +147,5 @@ The executable must be available on `PATH` before loading the extension.
 cargo fmt --check
 cargo test --locked
 cargo clippy --all-targets --all-features --locked -- -D warnings
+./tests/lifecycle-recovery.sh
 ```

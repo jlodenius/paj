@@ -30,6 +30,8 @@ interface PajSession {
 const COMMAND_TIMEOUT_MS = 5_000;
 const HEARTBEAT_INTERVAL_MS = 10_000;
 const MESSAGE_POLL_INTERVAL_MS = 1_000;
+const REGISTRATION_RETRY_INITIAL_MS = 1_000;
+const REGISTRATION_RETRY_MAX_MS = 30_000;
 
 export default function pajExtension(pi: ExtensionAPI) {
   let activeSessionId: string | undefined;
@@ -38,6 +40,12 @@ export default function pajExtension(pi: ExtensionAPI) {
   let messageTimer: ReturnType<typeof setInterval> | undefined;
   let messagePollPending: Promise<void> | undefined;
   let bridge: BridgeServer | undefined;
+  let registrationPending: Promise<void> | undefined;
+  let registrationRetryTimer: ReturnType<typeof setTimeout> | undefined;
+  let registrationRetryMs = REGISTRATION_RETRY_INITIAL_MS;
+  let registeredName: string | undefined;
+  let lastMessagePollError: string | undefined;
+  let shuttingDown = false;
 
   const execPaj = async (args: string[], cwd: string) => {
     const result = await pi.exec("paj", args, {
@@ -72,12 +80,9 @@ export default function pajExtension(pi: ExtensionAPI) {
     return JSON.parse(output) as PajMessage;
   };
 
-  const pollMessages = async (ctx: ExtensionContext) => {
-    if (!activeSessionId) {
-      return;
-    }
+  const pollMessages = async (ctx: ExtensionContext, sessionId: string) => {
     const output = await execPaj(
-      ["--json", "message", "pending", activeSessionId],
+      ["--json", "message", "pending", sessionId],
       ctx.cwd,
     );
     const messages = JSON.parse(output) as PajMessage[];
@@ -90,11 +95,44 @@ export default function pajExtension(pi: ExtensionAPI) {
       } else {
         pi.sendUserMessage(content, { deliverAs: "followUp" });
       }
-      await execPaj(["message", "ack", activeSessionId, message.id], ctx.cwd);
+      await execPaj(["message", "ack", sessionId, message.id], ctx.cwd);
     }
   };
 
-  pi.on("session_start", async (_event, ctx) => {
+  const isMissingSessionError = (error: unknown) =>
+    /session [0-9a-f-]+ was not found/.test(String(error));
+
+  const setDisconnected = (ctx: ExtensionContext) => {
+    if (ctx.hasUI) {
+      ctx.ui.setStatus("paj", ctx.ui.theme.fg("error", "paj:disconnected"));
+    }
+  };
+
+  const teardownRegistration = async (ctx: ExtensionContext) => {
+    const previousBridge = bridge;
+    const previousSessionId = activeSessionId;
+    bridge = undefined;
+    activeSessionId = undefined;
+    if (previousBridge) {
+      await previousBridge
+        .stop()
+        .catch((error: unknown) =>
+          console.error("paj bridge shutdown failed", error),
+        );
+    }
+    if (previousSessionId) {
+      await execPaj(
+        ["session", "unregister", previousSessionId],
+        ctx.cwd,
+      ).catch((error: unknown) => {
+        if (!isMissingSessionError(error)) {
+          console.error("paj unregister failed", error);
+        }
+      });
+    }
+  };
+
+  const registerSession = async (ctx: ExtensionContext) => {
     const args = [
       "--json",
       "session",
@@ -108,7 +146,8 @@ export default function pajExtension(pi: ExtensionAPI) {
       "--cwd",
       ctx.cwd,
     ];
-    const name = pi.getSessionName() ?? process.env.PAJ_AGENT_NAME;
+    const name =
+      pi.getSessionName() ?? process.env.PAJ_AGENT_NAME ?? registeredName;
     if (name) {
       args.push("--name", name);
     }
@@ -117,72 +156,153 @@ export default function pajExtension(pi: ExtensionAPI) {
       args.push("--task", task);
     }
 
-    try {
-      const output = await execPaj(args, ctx.cwd);
-      const session = JSON.parse(output) as PajSession;
-      activeSessionId = session.id;
-      if (!session.bridgeSocket) {
-        throw new Error("paj session did not advertise a bridge socket");
-      }
-      bridge = new BridgeServer({
-        isIdle: () => ctx.isIdle(),
-        sendPrompt: (text) => pi.sendUserMessage(text),
-      });
-      await bridge.start(session.bridgeSocket);
-      heartbeatTimer = setInterval(() => {
-        if (!activeSessionId || heartbeatPending) {
-          return;
-        }
-        heartbeatPending = execPaj(
-          ["session", "heartbeat", activeSessionId],
-          ctx.cwd,
-        )
-          .then(() => ctx.ui.setStatus("paj", undefined))
-          .catch((error: unknown) => {
-            if (ctx.hasUI) {
-              ctx.ui.setStatus(
-                "paj",
-                ctx.ui.theme.fg("error", "paj:disconnected"),
-              );
-            }
-            console.error("paj heartbeat failed", error);
-          })
-          .finally(() => {
-            heartbeatPending = undefined;
-          });
-      }, HEARTBEAT_INTERVAL_MS);
-      const poll = () => {
-        if (messagePollPending) {
-          return;
-        }
-        messagePollPending = pollMessages(ctx)
-          .catch((error: unknown) =>
-            console.error("paj message poll failed", error),
-          )
-          .finally(() => {
-            messagePollPending = undefined;
-          });
-      };
-      messageTimer = setInterval(poll, MESSAGE_POLL_INTERVAL_MS);
-      poll();
-    } catch (error) {
-      const failedBridge = bridge;
-      bridge = undefined;
-      if (failedBridge) {
-        await failedBridge.stop().catch(() => undefined);
-      }
-      const sessionId = activeSessionId;
-      activeSessionId = undefined;
-      if (sessionId) {
-        await execPaj(["session", "unregister", sessionId], ctx.cwd).catch(
-          () => undefined,
-        );
-      }
-      if (ctx.hasUI) {
-        ctx.ui.setStatus("paj", ctx.ui.theme.fg("error", "paj:disconnected"));
-        ctx.ui.notify(`paj registration failed: ${String(error)}`, "error");
-      }
+    const output = await execPaj(args, ctx.cwd);
+    const session = JSON.parse(output) as PajSession;
+    if (!session.bridgeSocket) {
+      await execPaj(["session", "unregister", session.id], ctx.cwd).catch(
+        () => undefined,
+      );
+      throw new Error("paj session did not advertise a bridge socket");
     }
+    const nextBridge = new BridgeServer({
+      isIdle: () => ctx.isIdle(),
+      sendPrompt: (text) => pi.sendUserMessage(text),
+    });
+    try {
+      await nextBridge.start(session.bridgeSocket);
+    } catch (error) {
+      await execPaj(["session", "unregister", session.id], ctx.cwd).catch(
+        () => undefined,
+      );
+      throw error;
+    }
+    bridge = nextBridge;
+    activeSessionId = session.id;
+    registeredName = session.name;
+  };
+
+  const scheduleRegistrationRetry = (ctx: ExtensionContext) => {
+    if (shuttingDown || registrationRetryTimer) {
+      return;
+    }
+    const delay = registrationRetryMs;
+    registrationRetryMs = Math.min(
+      registrationRetryMs * 2,
+      REGISTRATION_RETRY_MAX_MS,
+    );
+    registrationRetryTimer = setTimeout(() => {
+      registrationRetryTimer = undefined;
+      void beginRegistration(ctx).catch(() => undefined);
+    }, delay);
+  };
+
+  const beginRegistration = (ctx: ExtensionContext): Promise<void> => {
+    if (registrationPending) {
+      return registrationPending;
+    }
+    if (registrationRetryTimer) {
+      clearTimeout(registrationRetryTimer);
+      registrationRetryTimer = undefined;
+    }
+    const attempt = (async () => {
+      await teardownRegistration(ctx);
+      if (shuttingDown) {
+        return;
+      }
+      await registerSession(ctx);
+    })();
+    registrationPending = attempt;
+    void attempt.then(
+      () => {
+        registrationRetryMs = REGISTRATION_RETRY_INITIAL_MS;
+        if (ctx.hasUI) {
+          ctx.ui.setStatus("paj", undefined);
+        }
+        if (registrationPending === attempt) {
+          registrationPending = undefined;
+        }
+      },
+      (error: unknown) => {
+        setDisconnected(ctx);
+        console.error("paj registration failed; retrying", error);
+        if (registrationPending === attempt) {
+          registrationPending = undefined;
+        }
+        scheduleRegistrationRetry(ctx);
+      },
+    );
+    return attempt;
+  };
+
+  const handleOperationalFailure = (
+    ctx: ExtensionContext,
+    operation: "heartbeat" | "message poll",
+    sessionId: string,
+    error: unknown,
+  ) => {
+    if (sessionId !== activeSessionId) {
+      return;
+    }
+    if (isMissingSessionError(error)) {
+      setDisconnected(ctx);
+      console.error(`paj ${operation} lost registration; reconnecting`);
+      void beginRegistration(ctx).catch(() => undefined);
+      return;
+    }
+    setDisconnected(ctx);
+    const message = String(error);
+    if (operation !== "message poll" || message !== lastMessagePollError) {
+      console.error(`paj ${operation} failed`, error);
+    }
+    if (operation === "message poll") {
+      lastMessagePollError = message;
+    }
+  };
+
+  pi.on("session_start", async (_event, ctx) => {
+    shuttingDown = false;
+    heartbeatTimer = setInterval(() => {
+      const sessionId = activeSessionId;
+      if (!sessionId || heartbeatPending) {
+        return;
+      }
+      heartbeatPending = execPaj(["session", "heartbeat", sessionId], ctx.cwd)
+        .then(() => {
+          if (sessionId === activeSessionId && ctx.hasUI) {
+            ctx.ui.setStatus("paj", undefined);
+          }
+        })
+        .catch((error: unknown) =>
+          handleOperationalFailure(ctx, "heartbeat", sessionId, error),
+        )
+        .finally(() => {
+          heartbeatPending = undefined;
+        });
+    }, HEARTBEAT_INTERVAL_MS);
+    const poll = () => {
+      const sessionId = activeSessionId;
+      if (!sessionId || messagePollPending) {
+        return;
+      }
+      messagePollPending = pollMessages(ctx, sessionId)
+        .then(() => {
+          if (sessionId === activeSessionId) {
+            lastMessagePollError = undefined;
+            if (ctx.hasUI) {
+              ctx.ui.setStatus("paj", undefined);
+            }
+          }
+        })
+        .catch((error: unknown) =>
+          handleOperationalFailure(ctx, "message poll", sessionId, error),
+        )
+        .finally(() => {
+          messagePollPending = undefined;
+        });
+    };
+    messageTimer = setInterval(poll, MESSAGE_POLL_INTERVAL_MS);
+    await beginRegistration(ctx).catch(() => undefined);
+    poll();
   });
 
   pi.on("message_update", async (event) => {
@@ -198,6 +318,7 @@ export default function pajExtension(pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
+    shuttingDown = true;
     if (heartbeatTimer) {
       clearInterval(heartbeatTimer);
       heartbeatTimer = undefined;
@@ -206,25 +327,13 @@ export default function pajExtension(pi: ExtensionAPI) {
       clearInterval(messageTimer);
       messageTimer = undefined;
     }
+    if (registrationRetryTimer) {
+      clearTimeout(registrationRetryTimer);
+      registrationRetryTimer = undefined;
+    }
     await Promise.all([heartbeatPending, messagePollPending]);
-    const activeBridge = bridge;
-    bridge = undefined;
-    if (activeBridge) {
-      try {
-        await activeBridge.stop();
-      } catch (error) {
-        console.error("paj bridge shutdown failed", error);
-      }
-    }
-    const sessionId = activeSessionId;
-    activeSessionId = undefined;
-    if (sessionId) {
-      try {
-        await execPaj(["session", "unregister", sessionId], ctx.cwd);
-      } catch (error) {
-        console.error("paj unregister failed", error);
-      }
-    }
+    await registrationPending?.catch(() => undefined);
+    await teardownRegistration(ctx);
     if (ctx.hasUI) {
       ctx.ui.setStatus("paj", undefined);
     }
