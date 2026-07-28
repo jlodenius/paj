@@ -5,6 +5,7 @@ import type {
 import { Type } from "typebox";
 
 import { BridgeServer } from "./bridge.ts";
+import { deliverPendingMessages } from "./message-delivery.ts";
 
 interface PajMessage {
   id: string;
@@ -45,6 +46,7 @@ export default function pajExtension(pi: ExtensionAPI) {
   let registrationRetryMs = REGISTRATION_RETRY_INITIAL_MS;
   let registeredName: string | undefined;
   let lastMessagePollError: string | undefined;
+  const deliveredMessageIds = new Set<string>();
   let shuttingDown = false;
 
   const execPaj = async (args: string[], cwd: string) => {
@@ -86,17 +88,23 @@ export default function pajExtension(pi: ExtensionAPI) {
       ctx.cwd,
     );
     const messages = JSON.parse(output) as PajMessage[];
-    let deliverImmediately = ctx.isIdle();
-    for (const message of messages) {
-      const content = `[Message from ${message.from.name}]\n${message.text}`;
-      if (deliverImmediately) {
-        pi.sendUserMessage(content);
-        deliverImmediately = false;
-      } else {
-        pi.sendUserMessage(content, { deliverAs: "followUp" });
-      }
-      await execPaj(["message", "ack", sessionId, message.id], ctx.cwd);
-    }
+    await deliverPendingMessages(
+      messages,
+      deliveredMessageIds,
+      (message, immediately) => {
+        const content = `[Message from ${message.from.name}]\n${message.text}`;
+        if (immediately) {
+          pi.sendUserMessage(content);
+        } else {
+          pi.sendUserMessage(content, { deliverAs: "followUp" });
+        }
+      },
+      (message) =>
+        execPaj(["message", "ack", sessionId, message.id], ctx.cwd).then(
+          () => undefined,
+        ),
+      ctx.isIdle(),
+    );
   };
 
   const isMissingSessionError = (error: unknown) =>
@@ -167,6 +175,7 @@ export default function pajExtension(pi: ExtensionAPI) {
     const nextBridge = new BridgeServer({
       isIdle: () => ctx.isIdle(),
       sendPrompt: (text) => pi.sendUserMessage(text),
+      cancelPrompt: () => ctx.abort(),
     });
     try {
       await nextBridge.start(session.bridgeSocket);
@@ -389,7 +398,7 @@ export default function pajExtension(pi: ExtensionAPI) {
           const current = session.pid === process.pid ? "*" : " ";
           const branch = session.branch ?? "no branch";
           const task = session.task ? ` — ${session.task}` : "";
-          return `${current} ${session.name} [${session.role}/${session.status}] ${branch}${task}`;
+          return `${current} ${session.name} [${session.role}] ${branch}${task}`;
         });
         ctx.ui.notify(lines.join("\n"), "info");
       } catch (error) {

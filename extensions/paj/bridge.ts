@@ -7,7 +7,7 @@ const MAX_REQUEST_BYTES = 1024 * 1024;
 interface BridgeRequest {
   version: number;
   id: string;
-  method: string;
+  method: "prompt";
   params: {
     text: string;
   };
@@ -30,6 +30,7 @@ interface ActiveRequest {
 export interface BridgeActions {
   isIdle(): boolean;
   sendPrompt(text: string): void;
+  cancelPrompt(): void;
 }
 
 export class BridgeServer {
@@ -37,8 +38,11 @@ export class BridgeServer {
   private readonly sockets = new Set<Socket>();
   private active: ActiveRequest | undefined;
   private socketPath: string | undefined;
+  private readonly actions: BridgeActions;
 
-  constructor(private readonly actions: BridgeActions) {}
+  constructor(actions: BridgeActions) {
+    this.actions = actions;
+  }
 
   async start(socketPath: string): Promise<void> {
     if (this.server) {
@@ -184,28 +188,30 @@ export class BridgeServer {
       this.sockets.delete(socket);
       if (this.active?.socket === socket) {
         this.active = undefined;
+        this.actions.cancelPrompt();
       }
     });
     socket.on("error", () => undefined);
   }
 
   private acceptRequest(socket: Socket, line: string): void {
-    let request: BridgeRequest;
+    let value: unknown;
     try {
-      request = JSON.parse(line) as BridgeRequest;
+      value = JSON.parse(line);
     } catch {
       socket.destroy(new Error("bridge request was not valid JSON"));
       return;
     }
-    const validationError = validateRequest(request);
-    if (validationError) {
-      if (typeof request.id === "string") {
-        this.fail(socket, request.id, "invalid_request", validationError);
+    const validation = validateRequest(value);
+    if (!validation.ok) {
+      if (validation.id) {
+        this.fail(socket, validation.id, "invalid_request", validation.error);
       } else {
-        socket.destroy(new Error(validationError));
+        socket.destroy(new Error(validation.error));
       }
       return;
     }
+    const request = validation.request;
     if (this.active || !this.actions.isIdle()) {
       this.fail(socket, request.id, "busy", "Pi session is busy");
       return;
@@ -259,25 +265,58 @@ async function removeStaleSocket(socketPath: string): Promise<void> {
   }
 }
 
-function validateRequest(request: BridgeRequest): string | undefined {
-  if (request.version !== PROTOCOL_VERSION) {
-    return `unsupported bridge protocol version ${String(request.version)}`;
+type RequestValidation =
+  | { ok: true; request: BridgeRequest }
+  | { ok: false; id?: string; error: string };
+
+function validateRequest(value: unknown): RequestValidation {
+  if (!isRecord(value)) {
+    return { ok: false, error: "request must be a JSON object" };
   }
-  if (typeof request.id !== "string" || request.id.length === 0) {
-    return "request id is required";
+  const id = typeof value.id === "string" ? value.id : undefined;
+  if (value.version !== PROTOCOL_VERSION) {
+    return {
+      ok: false,
+      id,
+      error: `unsupported bridge protocol version ${String(value.version)}`,
+    };
   }
-  if (request.method !== "prompt") {
-    return `unsupported bridge method ${String(request.method)}`;
+  if (!id || !isUuid(id)) {
+    return { ok: false, error: "request id must be a UUID" };
+  }
+  if (value.method !== "prompt") {
+    return {
+      ok: false,
+      id,
+      error: `unsupported bridge method ${String(value.method)}`,
+    };
   }
   if (
-    typeof request.params !== "object" ||
-    request.params === null ||
-    typeof request.params.text !== "string" ||
-    request.params.text.trim().length === 0
+    !isRecord(value.params) ||
+    typeof value.params.text !== "string" ||
+    value.params.text.trim().length === 0
   ) {
-    return "prompt text is required";
+    return { ok: false, id, error: "prompt text is required" };
   }
-  return undefined;
+  return {
+    ok: true,
+    request: {
+      version: PROTOCOL_VERSION,
+      id,
+      method: "prompt",
+      params: { text: value.params.text },
+    },
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    value,
+  );
 }
 
 function isAssistantMessage(message: unknown): message is AssistantMessage {
