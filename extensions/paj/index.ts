@@ -348,6 +348,25 @@ export default function pajExtension(pi: ExtensionAPI) {
     }
   });
 
+  const getAgentName = async () => {
+    await registrationPending?.catch(() => undefined);
+    if (!registeredName) {
+      throw new Error("paj session is not registered");
+    }
+    return registeredName;
+  };
+
+  pi.registerCommand("agent-name", {
+    description: "Show this Pi agent's Paj name",
+    handler: async (_args, ctx) => {
+      try {
+        ctx.ui.notify(await getAgentName(), "info");
+      } catch (error) {
+        ctx.ui.notify(`Failed to get agent name: ${String(error)}`, "error");
+      }
+    },
+  });
+
   pi.registerCommand("agent-send", {
     description: "Send a message to another live Pi agent",
     handler: async (args, ctx) => {
@@ -404,6 +423,20 @@ export default function pajExtension(pi: ExtensionAPI) {
       } catch (error) {
         ctx.ui.notify(`Failed to list agents: ${String(error)}`, "error");
       }
+    },
+  });
+
+  pi.registerTool({
+    name: "get_agent_name",
+    label: "Get agent name",
+    description: "Return this Pi agent's own Paj name",
+    parameters: Type.Object({}),
+    async execute() {
+      const name = await getAgentName();
+      return {
+        content: [{ type: "text", text: name }],
+        details: { name },
+      };
     },
   });
 

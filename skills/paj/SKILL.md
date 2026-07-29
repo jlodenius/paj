@@ -5,6 +5,10 @@ description: Discover and communicate with other live Pi agents. Use when the us
 
 # Paj Agent Communication
 
+## Identify This Agent
+
+Use the extension-provided `get_agent_name` tool when this agent needs its own exact Paj name. `/agent-name` shows it to the user.
+
 ## Discover Agents
 
 Run `paj --json session list` to find live agents in the current project. Use `--all` only when the requested agent may be working in another project.

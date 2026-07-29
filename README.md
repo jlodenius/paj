@@ -59,11 +59,12 @@ Recipients can be addressed by exact name or session ID prefix. Messages remain 
 The Pi extension provides:
 
 ```text
+/agent-name
 /agents [all]
 /agent-send <agent> <message>
 ```
 
-Agents can send messages through the `send_agent_message` tool. Incoming messages are delivered as user messages and queued as follow-ups while the recipient is busy.
+`/agent-name` displays the current agent's registered Paj name. Agents can retrieve their own name through the `get_agent_name` tool and send messages through `send_agent_message`. Incoming messages are delivered as user messages and queued as follow-ups while the recipient is busy.
 
 ## Editor and external-client bridge
 
@@ -80,7 +81,7 @@ Bridge requests emit `accepted`, `delta`, and `complete` JSON events. Only one r
 
 ## Pi extension
 
-The extension in `extensions/paj` registers sessions, maintains their lifecycle, delivers messages, hosts the bridge, and exposes the commands and tool described above.
+The extension in `extensions/paj` registers sessions, maintains their lifecycle, delivers messages, hosts the bridge, and exposes the commands and tools described above.
 
 The `paj` executable must be available on `PATH` before loading the extension.
 
