@@ -68,6 +68,8 @@ enum SessionCommands {
     },
     /// Refresh a registered session's liveness timestamp.
     Heartbeat { id: Uuid },
+    /// Change a registered session's agent name.
+    Rename { id: Uuid, name: String },
     /// Remove a session and its pending messages from the registry.
     Unregister { id: Uuid },
     /// List live sessions in the current project or all projects.
@@ -171,6 +173,15 @@ fn run_session_command(registry: &Registry, command: SessionCommands, json: bool
         SessionCommands::Heartbeat { id } => {
             let session = registry.heartbeat(id)?;
             if json { print_json(&session) } else { Ok(()) }
+        }
+        SessionCommands::Rename { id, name } => {
+            let session = registry.rename(id, name)?;
+            if json {
+                print_json(&session)
+            } else {
+                println!("{}", session.name);
+                Ok(())
+            }
         }
         SessionCommands::Unregister { id } => {
             let session = registry.unregister(id)?;

@@ -132,6 +132,19 @@ impl Registry {
         Ok(session)
     }
 
+    pub fn rename(&self, id: Uuid, name: String) -> Result<Session, RegistryError> {
+        if name.trim().is_empty() {
+            return Err(RegistryError::InvalidAgentName);
+        }
+        let session_dir = self.find_session_dir(id)?;
+        let lock = open_lock(&session_dir)?;
+        lock.lock_exclusive()?;
+        let mut session = read_session(&session_dir)?;
+        session.name = name;
+        write_json_atomically(&session_dir.join(METADATA_FILE), &session)?;
+        Ok(session)
+    }
+
     pub fn unregister(&self, id: Uuid) -> Result<Session, RegistryError> {
         let session_dir = self.find_session_dir(id)?;
         let lock = open_lock(&session_dir)?;
@@ -423,6 +436,8 @@ pub enum RegistryError {
     RecipientNotFound(String),
     #[error("multiple live agents match {0}")]
     AmbiguousRecipient(String),
+    #[error("agent name cannot be empty")]
+    InvalidAgentName,
     #[error("message {0} was not found")]
     MessageNotFound(Uuid),
     #[error("failed to read session metadata at {path}")]
@@ -550,6 +565,50 @@ mod tests {
             .expect("heartbeat should succeed");
 
         assert!(updated.last_heartbeat_ms >= registered.last_heartbeat_ms);
+    }
+
+    #[test]
+    fn rename_updates_persisted_session_name() {
+        let directory = tempdir().expect("temporary directory should be created");
+        let registry =
+            Registry::new(directory.path().join("paj")).expect("registry should be created");
+        let registered = registry
+            .register(&project(), registration(std::process::id()))
+            .expect("session should be registered");
+
+        let renamed = registry
+            .rename(registered.id, "reviewer".to_owned())
+            .expect("session should be renamed");
+
+        assert_eq!(renamed.name, "reviewer");
+        assert_eq!(
+            registry
+                .show(registered.id)
+                .expect("renamed session should load")
+                .name,
+            "reviewer"
+        );
+    }
+
+    #[test]
+    fn rename_rejects_an_empty_name() {
+        let directory = tempdir().expect("temporary directory should be created");
+        let registry =
+            Registry::new(directory.path().join("paj")).expect("registry should be created");
+        let registered = registry
+            .register(&project(), registration(std::process::id()))
+            .expect("session should be registered");
+
+        let result = registry.rename(registered.id, "  ".to_owned());
+
+        assert!(matches!(result, Err(RegistryError::InvalidAgentName)));
+        assert_eq!(
+            registry
+                .show(registered.id)
+                .expect("original session should load")
+                .name,
+            "primary"
+        );
     }
 
     #[test]

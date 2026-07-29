@@ -7,7 +7,7 @@ description: Discover and communicate with other live Pi agents. Use when the us
 
 ## Identify This Agent
 
-Use the extension-provided `get_agent_name` tool when this agent needs its own exact Paj name. `/agent-name` shows it to the user.
+Use the extension-provided `get_agent_name` tool when this agent needs its own exact Paj name. `/agent-name` shows it to the user, and `/agent-rename <new-name>` renames it.
 
 ## Discover Agents
 
@@ -44,6 +44,7 @@ Use `--json` for structured output. Run `paj <command> --help` for complete opti
 | `paj session show <id>` | Inspect a session's metadata |
 | `paj session register --pid <pid> [...]` | Register a session manually |
 | `paj session heartbeat <id>` | Refresh a session's heartbeat |
+| `paj session rename <id> <name>` | Rename a registered session |
 | `paj session unregister <id>` | Remove a session registration |
 | `paj message send <recipient> --from <id> --text <text>` | Send a message from the CLI |
 | `paj message pending <session>` | List messages awaiting delivery |

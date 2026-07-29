@@ -41,6 +41,7 @@ For integrations and lifecycle testing, sessions can also be managed directly:
 ```sh
 paj session register --pid "$PID" --name primary
 paj session heartbeat <session-id>
+paj session rename <session-id> reviewer
 paj session unregister <session-id>
 ```
 
@@ -60,11 +61,12 @@ The Pi extension provides:
 
 ```text
 /agent-name
+/agent-rename <new-name>
 /agents [all]
 /agent-send <agent> <message>
 ```
 
-`/agent-name` displays the current agent's registered Paj name. Agents can retrieve their own name through the `get_agent_name` tool and send messages through `send_agent_message`. Incoming messages are delivered as user messages and queued as follow-ups while the recipient is busy.
+`/agent-name` displays the current agent's registered Paj name. `/agent-rename` renames the agent and persists that name as the Pi session name. Changes made with Pi's built-in `/name` command are also reflected in Paj. Agents can retrieve their own name through the `get_agent_name` tool and send messages through `send_agent_message`. Incoming messages are delivered as user messages and queued as follow-ups while the recipient is busy.
 
 ## Editor and external-client bridge
 

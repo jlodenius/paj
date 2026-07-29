@@ -4,6 +4,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
+import { renamePajSession } from "./agent-name.ts";
 import { BridgeServer } from "./bridge.ts";
 import { deliverPendingMessages } from "./message-delivery.ts";
 
@@ -80,6 +81,20 @@ export default function pajExtension(pi: ExtensionAPI) {
       cwd,
     );
     return JSON.parse(output) as PajMessage;
+  };
+
+  const renameAgent = async (name: string, cwd: string) => {
+    await registrationPending?.catch(() => undefined);
+    const sessionId = activeSessionId;
+    if (!sessionId) {
+      throw new Error("paj session is not registered");
+    }
+    const session = await renamePajSession(execPaj, sessionId, name, cwd);
+    if (sessionId !== activeSessionId) {
+      throw new Error("paj registration changed while renaming");
+    }
+    registeredName = session.name;
+    return session.name;
   };
 
   const pollMessages = async (ctx: ExtensionContext, sessionId: string) => {
@@ -314,6 +329,24 @@ export default function pajExtension(pi: ExtensionAPI) {
     poll();
   });
 
+  pi.on("session_info_changed", async (event, ctx) => {
+    if (!event.name || event.name === registeredName) {
+      return;
+    }
+    if (!activeSessionId) {
+      registeredName = event.name;
+      return;
+    }
+    try {
+      await renameAgent(event.name, ctx.cwd);
+    } catch (error) {
+      console.error("paj rename failed", error);
+      if (ctx.hasUI) {
+        ctx.ui.notify(`Failed to rename Paj agent: ${String(error)}`, "error");
+      }
+    }
+  });
+
   pi.on("message_update", async (event) => {
     bridge?.onMessageUpdate(event);
   });
@@ -363,6 +396,24 @@ export default function pajExtension(pi: ExtensionAPI) {
         ctx.ui.notify(await getAgentName(), "info");
       } catch (error) {
         ctx.ui.notify(`Failed to get agent name: ${String(error)}`, "error");
+      }
+    },
+  });
+
+  pi.registerCommand("agent-rename", {
+    description: "Rename this Pi agent in Paj",
+    handler: async (args, ctx) => {
+      const name = args.trim();
+      if (!name) {
+        ctx.ui.notify("Usage: /agent-rename <new-name>", "warning");
+        return;
+      }
+      try {
+        const renamed = await renameAgent(name, ctx.cwd);
+        pi.setSessionName(renamed);
+        ctx.ui.notify(`Paj agent renamed to ${renamed}`, "info");
+      } catch (error) {
+        ctx.ui.notify(`Failed to rename agent: ${String(error)}`, "error");
       }
     },
   });
