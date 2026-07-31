@@ -18,4 +18,12 @@ Use `scripts/tmux-agent` from this skill directory. Run `resolve` when a project
 | `scripts/tmux-agent stop SPAWN_ID_OR_NAME` | Stop one child |
 | `scripts/tmux-agent stop --all` | Stop all children owned by this session |
 
-`--cwd DIR` selects a directory within the resolved project; with `--project`, relative cwd values start at the project root. When the user requests a particular model, pass it to `spawn` with `--model MODEL`; use Pi's `provider/id` form when the provider is specified and preserve any requested `:thinking` suffix. Do not select a model when the user has not requested one. The spawn output includes the stable spawn ID, synchronized Pi/Paj name, tmux ID, project root, and cross-server attach command. Children remain attached to their tmux sessions after completing the initial task so they can receive follow-up messages. Give each child a finite task and let it finish normally. Never instruct it to wait, remain active, sleep, or otherwise keep itself alive; the harness preserves the session after completion. Children report completion to the stable parent Pi session ID; do not manually acknowledge Paj messages.
+## Spawning
+
+- `--cwd DIR` selects a directory within the project. With `--project`, a relative directory starts at the project root.
+- Pass `--model MODEL` only when requested. Use `provider/id` when specified and preserve any `:thinking` suffix.
+- Spawn output includes the child IDs, name, project root, and attach command.
+
+## Completion
+
+Give each child a finite task. Never tell it to wait, sleep, or remain active; the harness keeps completed sessions attached for follow-ups. Children report completion to the stable parent Pi session ID. Do not manually acknowledge Paj messages.
