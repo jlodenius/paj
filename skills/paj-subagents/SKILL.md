@@ -1,6 +1,6 @@
 ---
 name: paj-subagents
-description: Spawn or delegate work to tmux-backed Pi subagents, including when the user says to use subagents if necessary. Use for explicit spawning, delegation, parallel work, or subagent lifecycle management.
+description: Spawn and manage tmux-backed Pi subagents for parallel work and reduced parent-session context use.
 ---
 
 # Paj Subagents
