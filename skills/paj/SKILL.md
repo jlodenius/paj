@@ -7,7 +7,7 @@ description: Discover and communicate with live Pi agents for cross-agent reques
 
 ## Boundary: spawning versus messaging
 
-This skill communicates with agents that already exist. If the user explicitly says to **spawn**, **start**, **create**, or **launch** agents, load the `paj-subagents` skill and create new children directly. Do not discover an agent in the target project and forward the spawn request to it; a project named in a spawn request is the location for the new children, not a message recipient.
+This skill communicates with agents that already exist. If the user explicitly says to **spawn**, **start**, **create**, or **launch** agents, load the `paj-subagents` skill and create new children directly.
 
 ## Identify This Agent
 
