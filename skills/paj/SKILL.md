@@ -1,6 +1,6 @@
 ---
 name: paj
-description: Discover and communicate with other live Pi agents. Use when the user asks to tell, ask, notify, contact, coordinate with, or report findings to another existing agent or session, refers to work another agent is doing, or asks which agents are currently active.
+description: Discover and communicate with live Pi agents for cross-agent requests, coordination, status, and reporting.
 ---
 
 # Paj Agent Communication
