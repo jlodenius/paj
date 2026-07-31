@@ -33,6 +33,10 @@ Use `scripts/tmux-agent` from the directory containing this `SKILL.md` (`paj-sub
 - Pass `--model MODEL` only when requested. Use `provider/id` when specified and preserve any `:thinking` suffix.
 - Spawn output includes the child IDs, name, project root, and attach command.
 
+## After spawning
+
+Once all requested spawn commands succeed, make no more tool calls for the children and return control to the user immediately.
+
 ## Completion
 
 Give each child a finite task. Never tell it to wait, sleep, or remain active; the harness keeps completed sessions attached for follow-ups. Children report completion to the stable parent Pi session ID. Do not manually acknowledge Paj messages.
