@@ -109,7 +109,7 @@ case "$command" in
     launcher=$directory/launch.py
     environment=$directory/environment
     {
-      printf 'You are a Paj subagent. Work only on the task below. Clarify uncertainties rather than guessing; resolve the exact project and obey all repository rules. When complete, report results, checks, caveats, your Pi session ID, Paj name, spawn ID, and project root to parent Pi session %s using send_agent_message. Do not manually acknowledge messages.\n\nTask:\n' "$PAJ_PI_SESSION_ID"
+      printf 'You are a Paj subagent. Work only on the task below. Clarify uncertainties rather than guessing; resolve the exact project and obey all repository rules. When complete, send a concise report of the results and any relevant checks or caveats to parent Pi session %s using send_agent_message. Omit agent, session, spawn, and project metadata; the parent can resolve it from your Paj name. Do not manually acknowledge messages.\n\nTask:\n' "$PAJ_PI_SESSION_ID"
       cat "$directory/task"
     } >"$prompt"
     env -0 >"$environment"

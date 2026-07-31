@@ -39,7 +39,7 @@ test("subagent listing joins active status and emits a cross-server attach comma
       "agent-child [busy]",
       "  cwd     /project/src",
       "  prompt  Run tests",
-      "  spawn   spawn-id",
+      "  id      spawn-id",
       "  tmux    paj-child",
       "  attach  tmux -L paj attach-session -t =paj-child",
     ].join("\n"),

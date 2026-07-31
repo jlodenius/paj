@@ -101,7 +101,7 @@ export function formatSubagents(
         `${style.name(child.name)} ${style.status(child.status)}`,
         row("cwd", style.value(child.cwd)),
         row("prompt", style.value(child.task.split("\n", 1)[0])),
-        row("spawn", style.value(child.spawnId)),
+        row("id", style.value(child.spawnId)),
         row("tmux", style.value(child.tmuxName)),
         row("attach", style.command(attach)),
       ].join("\n");
