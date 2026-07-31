@@ -5,7 +5,7 @@ description: Spawn and manage tmux-backed Pi subagents for parallel work and red
 
 # Paj Subagents
 
-Use `scripts/tmux-agent` from this skill directory. Run `resolve` when a project reference is not already an exact path; never guess among candidates. Before spawning, clarify the task and project when either is ambiguous, and follow the target repository's rules.
+Use `scripts/tmux-agent` from the directory containing this `SKILL.md` (`paj-subagents`, not the sibling `paj` skill). Before invoking it, resolve that relative path against this skill's own location and use the resulting absolute path. Run `resolve` when a project reference is not already an exact path; never guess among candidates. Before spawning, clarify the task and project when either is ambiguous, and follow the target repository's rules.
 
 ## Script reference
 

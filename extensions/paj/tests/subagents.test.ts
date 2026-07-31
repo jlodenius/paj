@@ -33,8 +33,38 @@ test("subagent listing joins active status and emits a cross-server attach comma
     child.attachCommand,
     "TMUX= tmux -L paj attach-session -t =paj-child",
   );
-  assert.match(formatSubagents([child]), /Run tests/);
+  assert.equal(
+    formatSubagents([child]),
+    [
+      "agent-child [busy]",
+      "  cwd     /project/src",
+      "  prompt  Run tests",
+      "  spawn   spawn-id",
+      "  tmux    paj-child",
+      "  attach  tmux -L paj attach-session -t =paj-child",
+    ].join("\n"),
+  );
   assert.doesNotMatch(formatSubagents([child]), /and report/);
+});
+
+test("subagent listing separates agents and styles labels independently", () => {
+  const children = combineSubagents(
+    [record, { ...record, spawnId: "spawn-two", name: "agent-two" }],
+    [{ id: "child-paj", status: "busy" }],
+  );
+  const formatted = formatSubagents(children, {
+    name: (value) => `<name>${value}</name>`,
+    status: (value) => `<status>${value}</status>`,
+    label: (value) => `<label>${value}</label>`,
+    value: (value) => `<value>${value}</value>`,
+    command: (value) => `<command>${value}</command>`,
+  });
+
+  assert.match(formatted, /<name>agent-child<\/name> <status>busy<\/status>/);
+  assert.match(formatted, /<label>cwd     <\/label><value>\/project\/src<\/value>/);
+  assert.match(formatted, /<label>prompt  <\/label><value>Run tests<\/value>/);
+  assert.match(formatted, /<label>attach  <\/label><command>tmux -L paj attach-session/);
+  assert.match(formatted, /<\/command>\n\n<name>agent-two<\/name>/);
 });
 
 test("shutdown cleanup preserves children only for reload", () => {

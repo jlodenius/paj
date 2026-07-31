@@ -627,13 +627,30 @@ export default function pajExtension(pi: ExtensionAPI) {
     handler: async (_args, ctx) => {
       try {
         const children = await listSubagents(ctx);
-        const message = children.length
-          ? formatSubagents(children)
-          : "No active subagents found";
-        ctx.ui.notify(
-          ctx.mode === "tui" ? ctx.ui.theme.fg("text", message) : message,
-          "info",
-        );
+        if (children.length === 0) {
+          ctx.ui.notify("No active subagents found", "info");
+          return;
+        }
+        const message =
+          ctx.mode === "tui"
+            ? formatSubagents(children, {
+                name: (value) =>
+                  ctx.ui.theme.fg("warning", ctx.ui.theme.bold(value)),
+                status: (value) =>
+                  ctx.ui.theme.fg(
+                    value === "idle"
+                      ? "success"
+                      : value === "busy"
+                        ? "warning"
+                        : "dim",
+                    `[${value}]`,
+                  ),
+                label: (value) => ctx.ui.theme.fg("warning", value),
+                value: (value) => ctx.ui.theme.fg("text", value),
+                command: (value) => ctx.ui.theme.fg("accent", value),
+              })
+            : formatSubagents(children);
+        ctx.ui.notify(message, "info");
       } catch (error) {
         ctx.ui.notify(`Failed to list subagents: ${String(error)}`, "error");
       }

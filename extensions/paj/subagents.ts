@@ -72,11 +72,39 @@ export async function cleanupSubagents(
   }
 }
 
-export function formatSubagents(subagents: ListedSubagent[]): string {
+export interface SubagentFormatStyle {
+  name: (value: string) => string;
+  status: (value: ListedSubagent["status"]) => string;
+  label: (value: string) => string;
+  value: (value: string) => string;
+  command: (value: string) => string;
+}
+
+const plainStyle: SubagentFormatStyle = {
+  name: (value) => value,
+  status: (value) => `[${value}]`,
+  label: (value) => value,
+  value: (value) => value,
+  command: (value) => value,
+};
+
+export function formatSubagents(
+  subagents: ListedSubagent[],
+  style: SubagentFormatStyle = plainStyle,
+): string {
   return subagents
-    .map(
-      (child) =>
-        `${child.name} [${child.status}] ${child.projectRoot} — ${child.task.split("\n", 1)[0]}\n  spawn: ${child.spawnId}  tmux: ${child.tmuxName}\n  ${child.attachCommand}`,
-    )
-    .join("\n");
+    .map((child) => {
+      const row = (label: string, value: string) =>
+        `  ${style.label(label.padEnd(8))}${value}`;
+      const attach = child.attachCommand.replace(/^TMUX= tmux /, "tmux ");
+      return [
+        `${style.name(child.name)} ${style.status(child.status)}`,
+        row("cwd", style.value(child.cwd)),
+        row("prompt", style.value(child.task.split("\n", 1)[0])),
+        row("spawn", style.value(child.spawnId)),
+        row("tmux", style.value(child.tmuxName)),
+        row("attach", style.command(attach)),
+      ].join("\n");
+    })
+    .join("\n\n");
 }
