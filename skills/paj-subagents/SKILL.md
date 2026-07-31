@@ -10,6 +10,7 @@ Use `scripts/tmux-agent` from this skill directory. Run `resolve` when a project
 Pass tasks with `--task` or, for complex text, a private `--task-file`:
 
 ```sh
+scripts/tmux-agent resolve PROJECT
 scripts/tmux-agent spawn --project PROJECT --task-file FILE
 scripts/tmux-agent spawn --project PROJECT --model PROVIDER/MODEL --task-file FILE
 scripts/tmux-agent list
