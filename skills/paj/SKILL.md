@@ -26,7 +26,7 @@ Include:
 - Constraints the recipient needs to follow.
 - Whether a response is expected.
 
-Keep messages concise. If the requested recipient is unavailable, tell the user rather than silently choosing another agent.
+Keep messages concise. Do not reference the current context; the recipient only knows what the message includes. If the requested recipient is unavailable, tell the user rather than silently choosing another agent.
 
 ## Receive Messages
 
