@@ -59,7 +59,7 @@ test "${child_args[0]}" = --name
 test "${child_args[2]}" = --model
 test "${child_args[3]}" = 'openai/gpt-5.4:high'
 grep -Fq 'send a concise report of the results and any relevant checks or caveats' <<<"${child_args[4]}"
-grep -Fq 'Omit agent, session, spawn, and project metadata' <<<"${child_args[4]}"
+grep -Fq 'it remains available in the subagent record owned by the parent' <<<"${child_args[4]}"
 ! grep -Fq 'your Pi session ID, Paj name, spawn ID, and project root' <<<"${child_args[4]}"
 $helper list | grep -q "$spawn_id"
 paj gc --stale-after 60 >/dev/null
