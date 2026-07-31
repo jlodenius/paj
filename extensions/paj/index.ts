@@ -8,6 +8,10 @@ import { renamePajSession } from "./agent-name.ts";
 import { BridgeServer } from "./bridge.ts";
 import { deliverPendingMessages } from "./message-delivery.ts";
 import { registerProposalTool } from "./proposal-tool.ts";
+import {
+  type PajSessionStatus,
+  setPajSessionStatus,
+} from "./session-status.ts";
 
 interface PajMessage {
   id: string;
@@ -47,6 +51,8 @@ export default function pajExtension(pi: ExtensionAPI) {
   let registrationRetryTimer: ReturnType<typeof setTimeout> | undefined;
   let registrationRetryMs = REGISTRATION_RETRY_INITIAL_MS;
   let registeredName: string | undefined;
+  let desiredStatus: PajSessionStatus = "idle";
+  let statusUpdatePending: Promise<void> | undefined;
   let lastMessagePollError: string | undefined;
   const deliveredMessageIds = new Set<string>();
   let shuttingDown = false;
@@ -143,6 +149,7 @@ export default function pajExtension(pi: ExtensionAPI) {
     const previousSessionId = activeSessionId;
     bridge = undefined;
     activeSessionId = undefined;
+    await statusUpdatePending?.catch(() => undefined);
     if (previousBridge) {
       await previousBridge
         .stop()
@@ -212,6 +219,9 @@ export default function pajExtension(pi: ExtensionAPI) {
     bridge = nextBridge;
     activeSessionId = session.id;
     registeredName = session.name;
+    if (session.status !== desiredStatus) {
+      await queueStatusUpdate(ctx, desiredStatus);
+    }
   };
 
   const scheduleRegistrationRetry = (ctx: ExtensionContext) => {
@@ -269,7 +279,7 @@ export default function pajExtension(pi: ExtensionAPI) {
 
   const handleOperationalFailure = (
     ctx: ExtensionContext,
-    operation: "heartbeat" | "message poll",
+    operation: "heartbeat" | "message poll" | "status update",
     sessionId: string,
     error: unknown,
   ) => {
@@ -290,6 +300,41 @@ export default function pajExtension(pi: ExtensionAPI) {
     if (operation === "message poll") {
       lastMessagePollError = message;
     }
+  };
+
+  const queueStatusUpdate = (
+    ctx: ExtensionContext,
+    status: PajSessionStatus,
+  ): Promise<void> => {
+    desiredStatus = status;
+    const previous = statusUpdatePending?.catch(() => undefined);
+    const update = (previous ?? Promise.resolve()).then(async () => {
+      const sessionId = activeSessionId;
+      if (!sessionId) {
+        return;
+      }
+      try {
+        await setPajSessionStatus(execPaj, sessionId, status, ctx.cwd);
+      } catch (error) {
+        handleOperationalFailure(ctx, "status update", sessionId, error);
+        throw error;
+      }
+    });
+    statusUpdatePending = update;
+    void update.finally(() => {
+      if (statusUpdatePending === update) {
+        statusUpdatePending = undefined;
+      }
+    }).catch(() => undefined);
+    return update;
+  };
+
+  const listAgents = async (all: boolean, cwd: string) => {
+    const command = ["--json", "session", "list"];
+    if (all) {
+      command.push("--all");
+    }
+    return JSON.parse(await execPaj(command, cwd)) as PajSession[];
   };
 
   pi.on("session_start", async (_event, ctx) => {
@@ -356,6 +401,10 @@ export default function pajExtension(pi: ExtensionAPI) {
     }
   });
 
+  pi.on("agent_start", async (_event, ctx) => {
+    await queueStatusUpdate(ctx, "busy").catch(() => undefined);
+  });
+
   pi.on("message_update", async (event) => {
     bridge?.onMessageUpdate(event);
   });
@@ -364,8 +413,9 @@ export default function pajExtension(pi: ExtensionAPI) {
     bridge?.onMessageEnd(event);
   });
 
-  pi.on("agent_settled", async () => {
+  pi.on("agent_settled", async (_event, ctx) => {
     bridge?.onAgentSettled();
+    await queueStatusUpdate(ctx, "idle").catch(() => undefined);
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
@@ -463,12 +513,7 @@ export default function pajExtension(pi: ExtensionAPI) {
         return;
       }
       try {
-        const command = ["--json", "session", "list"];
-        if (scope === "all") {
-          command.push("--all");
-        }
-        const output = await execPaj(command, ctx.cwd);
-        const sessions = JSON.parse(output) as PajSession[];
+        const sessions = await listAgents(scope === "all", ctx.cwd);
         if (sessions.length === 0) {
           ctx.ui.notify("No live Pi agents found", "info");
           return;
@@ -477,7 +522,7 @@ export default function pajExtension(pi: ExtensionAPI) {
           const current = session.pid === process.pid ? "*" : " ";
           const branch = session.branch ?? "no branch";
           const task = session.task ? ` — ${session.task}` : "";
-          return `${current} ${session.name} [${session.role}] ${branch}${task}`;
+          return `${current} ${session.name} [${session.role}/${session.status}] ${branch}${task}`;
         });
         ctx.ui.notify(lines.join("\n"), "info");
       } catch (error) {
@@ -496,6 +541,24 @@ export default function pajExtension(pi: ExtensionAPI) {
       return {
         content: [{ type: "text", text: name }],
         details: { name },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "list_agents",
+    label: "List agents",
+    description: "List live Paj agents and their idle or busy status",
+    parameters: Type.Object({
+      all: Type.Optional(
+        Type.Boolean({ description: "List agents across all projects" }),
+      ),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const sessions = await listAgents(params.all ?? false, ctx.cwd);
+      return {
+        content: [{ type: "text", text: JSON.stringify(sessions, null, 2) }],
+        details: { sessions },
       };
     },
   });

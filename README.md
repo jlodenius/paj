@@ -42,6 +42,7 @@ For integrations and lifecycle testing, sessions can also be managed directly:
 paj session register --pid "$PID" --name primary
 paj session heartbeat <session-id>
 paj session rename <session-id> reviewer
+paj session status <session-id> busy
 paj session unregister <session-id>
 ```
 
@@ -66,7 +67,7 @@ The Pi extension provides:
 /agent-send <agent> <message>
 ```
 
-`/agent-name` displays the current agent's registered Paj name. `/agent-rename` renames the agent and persists that name as the Pi session name. Changes made with Pi's built-in `/name` command are also reflected in Paj. Agents can retrieve their own name through the `get_agent_name` tool and send messages through `send_agent_message`. Incoming messages are delivered as user messages and queued as follow-ups while the recipient is busy.
+`/agent-name` displays the current agent's registered Paj name. `/agent-rename` renames the agent and persists that name as the Pi session name. Changes made with Pi's built-in `/name` command are also reflected in Paj. `/agents` shows whether each live session is idle or busy. Agents can retrieve their own name through `get_agent_name`, inspect live sessions through `list_agents`, and send messages through `send_agent_message`. Incoming messages are delivered as user messages and queued as follow-ups while the recipient is busy.
 
 ## Editor and external-client bridge
 
@@ -83,7 +84,7 @@ Bridge requests emit `accepted`, `delta`, and `complete` JSON events. Only one r
 
 ## Pi extension
 
-The extension in `extensions/paj` registers sessions, maintains their lifecycle, delivers messages, hosts the bridge, and exposes the commands and tools described above.
+The extension in `extensions/paj` registers sessions, maintains their lifecycle and idle/busy status, delivers messages, hosts the bridge, and exposes the commands and tools described above.
 
 The `paj` executable must be available on `PATH` before loading the extension.
 

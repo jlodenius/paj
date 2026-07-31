@@ -13,6 +13,7 @@ use crate::project::Project;
 const INBOX_DIRECTORY: &str = "inbox";
 const LOCK_FILE: &str = ".lock";
 const METADATA_FILE: &str = "metadata.json";
+const VALID_SESSION_STATUSES: [&str; 2] = ["idle", "busy"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -141,6 +142,19 @@ impl Registry {
         lock.lock_exclusive()?;
         let mut session = read_session(&session_dir)?;
         session.name = name;
+        write_json_atomically(&session_dir.join(METADATA_FILE), &session)?;
+        Ok(session)
+    }
+
+    pub fn set_status(&self, id: Uuid, status: String) -> Result<Session, RegistryError> {
+        if !VALID_SESSION_STATUSES.contains(&status.as_str()) {
+            return Err(RegistryError::InvalidSessionStatus(status));
+        }
+        let session_dir = self.find_session_dir(id)?;
+        let lock = open_lock(&session_dir)?;
+        lock.lock_exclusive()?;
+        let mut session = read_session(&session_dir)?;
+        session.status = status;
         write_json_atomically(&session_dir.join(METADATA_FILE), &session)?;
         Ok(session)
     }
@@ -438,6 +452,8 @@ pub enum RegistryError {
     AmbiguousRecipient(String),
     #[error("agent name cannot be empty")]
     InvalidAgentName,
+    #[error("invalid session status {0}; expected idle or busy")]
+    InvalidSessionStatus(String),
     #[error("message {0} was not found")]
     MessageNotFound(Uuid),
     #[error("failed to read session metadata at {path}")]
@@ -587,6 +603,53 @@ mod tests {
                 .expect("renamed session should load")
                 .name,
             "reviewer"
+        );
+    }
+
+    #[test]
+    fn status_updates_persisted_session_status() {
+        let directory = tempdir().expect("temporary directory should be created");
+        let registry =
+            Registry::new(directory.path().join("paj")).expect("registry should be created");
+        let registered = registry
+            .register(&project(), registration(std::process::id()))
+            .expect("session should be registered");
+
+        let updated = registry
+            .set_status(registered.id, "busy".to_owned())
+            .expect("status should update");
+
+        assert_eq!(updated.status, "busy");
+        assert_eq!(
+            registry
+                .show(registered.id)
+                .expect("updated session should load")
+                .status,
+            "busy"
+        );
+    }
+
+    #[test]
+    fn status_rejects_unknown_values() {
+        let directory = tempdir().expect("temporary directory should be created");
+        let registry =
+            Registry::new(directory.path().join("paj")).expect("registry should be created");
+        let registered = registry
+            .register(&project(), registration(std::process::id()))
+            .expect("session should be registered");
+
+        let result = registry.set_status(registered.id, "working".to_owned());
+
+        assert!(matches!(
+            result,
+            Err(RegistryError::InvalidSessionStatus(_))
+        ));
+        assert_eq!(
+            registry
+                .show(registered.id)
+                .expect("original session should load")
+                .status,
+            "idle"
         );
     }
 

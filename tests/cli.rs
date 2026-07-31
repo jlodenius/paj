@@ -100,6 +100,57 @@ fn rename_updates_session_and_outputs_json() {
 }
 
 #[test]
+fn status_updates_session_and_outputs_json() {
+    let runtime = tempdir().expect("runtime directory should be created");
+    let project = tempdir().expect("project directory should be created");
+    let registry = Registry::new(runtime.path().to_path_buf()).expect("registry should be created");
+    let project_metadata = Project::discover(project.path()).expect("project should be discovered");
+    let session = registry
+        .register(
+            &project_metadata,
+            Registration {
+                pid: std::process::id(),
+                pi_session_id: None,
+                name: Some("primary".to_owned()),
+                role: "primary".to_owned(),
+                task: None,
+                cwd: project.path().to_path_buf(),
+                branch: None,
+            },
+        )
+        .expect("session should register");
+
+    let output = paj()
+        .current_dir(project.path())
+        .env("PAJ_RUNTIME_DIR", runtime.path())
+        .args([
+            "--json",
+            "session",
+            "status",
+            &session.id.to_string(),
+            "busy",
+        ])
+        .output()
+        .expect("paj should run");
+
+    assert!(
+        output.status.success(),
+        "paj failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let updated: Session =
+        serde_json::from_slice(&output.stdout).expect("output should contain a session");
+    assert_eq!(updated.status, "busy");
+    assert_eq!(
+        registry
+            .show(session.id)
+            .expect("updated session should load")
+            .status,
+        "busy"
+    );
+}
+
+#[test]
 fn list_outputs_empty_json_array_when_project_has_no_sessions() {
     let runtime = tempdir().expect("runtime directory should be created");
     let project = tempdir().expect("project directory should be created");

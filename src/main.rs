@@ -70,6 +70,12 @@ enum SessionCommands {
     Heartbeat { id: Uuid },
     /// Change a registered session's agent name.
     Rename { id: Uuid, name: String },
+    /// Change whether a registered session is idle or busy.
+    Status {
+        id: Uuid,
+        #[arg(value_parser = ["idle", "busy"])]
+        status: String,
+    },
     /// Remove a session and its pending messages from the registry.
     Unregister { id: Uuid },
     /// List live sessions in the current project or all projects.
@@ -180,6 +186,15 @@ fn run_session_command(registry: &Registry, command: SessionCommands, json: bool
                 print_json(&session)
             } else {
                 println!("{}", session.name);
+                Ok(())
+            }
+        }
+        SessionCommands::Status { id, status } => {
+            let session = registry.set_status(id, status)?;
+            if json {
+                print_json(&session)
+            } else {
+                println!("{}", session.status);
                 Ok(())
             }
         }
