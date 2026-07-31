@@ -120,7 +120,7 @@ impl Registry {
         let mut session = session;
         session.bridge_socket = Some(session_dir.join("bridge.sock"));
         fs::create_dir_all(&session_dir)?;
-        let lock = open_lock(&session_dir)?;
+        let lock = create_lock(&session_dir)?;
         lock.lock_exclusive()?;
         write_json_atomically(&session_dir.join(METADATA_FILE), &session)?;
 
@@ -197,10 +197,24 @@ impl Registry {
             };
             for entry in entries {
                 let entry = entry?;
-                if entry.file_type()?.is_dir() {
-                    let lock = open_lock(&entry.path())?;
-                    lock.lock_shared()?;
-                    sessions.push(read_session(&entry.path())?);
+                if !entry.file_type()?.is_dir() {
+                    continue;
+                }
+                let lock = match open_lock(&entry.path()) {
+                    Ok(lock) => lock,
+                    Err(RegistryError::Io(source))
+                        if source.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
+                lock.lock_shared()?;
+                match read_session(&entry.path()) {
+                    Ok(session) => sessions.push(session),
+                    Err(RegistryError::ReadMetadata { source, .. })
+                        if source.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
                 }
             }
         }
@@ -408,7 +422,7 @@ fn process_is_alive(pid: u32) -> bool {
     Path::new("/proc").join(pid.to_string()).exists()
 }
 
-fn open_lock(directory: &Path) -> Result<File, RegistryError> {
+fn create_lock(directory: &Path) -> Result<File, RegistryError> {
     let path = directory.join(LOCK_FILE);
     let file = OpenOptions::new()
         .read(true)
@@ -418,6 +432,13 @@ fn open_lock(directory: &Path) -> Result<File, RegistryError> {
         .open(&path)?;
     set_private_file_permissions(&path)?;
     Ok(file)
+}
+
+fn open_lock(directory: &Path) -> Result<File, RegistryError> {
+    Ok(OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(directory.join(LOCK_FILE))?)
 }
 
 #[cfg(unix)]
@@ -702,6 +723,26 @@ mod tests {
             .expect("sessions should be listed");
 
         assert_eq!(sessions.len(), 1);
+    }
+
+    #[test]
+    fn list_ignores_incomplete_session_directories() {
+        let directory = tempdir().expect("temporary directory should be created");
+        let root = directory.path().join("paj");
+        let registry = Registry::new(root.clone()).expect("registry should be created");
+        let sessions = root.join("projects/project-id/sessions");
+        let empty = sessions.join(Uuid::now_v7().to_string());
+        let lock_only = sessions.join(Uuid::now_v7().to_string());
+        fs::create_dir_all(&empty).expect("empty session directory should be created");
+        fs::create_dir_all(&lock_only).expect("lock-only session directory should be created");
+        fs::write(lock_only.join(".lock"), []).expect("lock file should be created");
+
+        let listed = registry
+            .list(Some("project-id"))
+            .expect("incomplete sessions should be ignored");
+
+        assert!(listed.is_empty());
+        assert!(!empty.join(".lock").exists());
     }
 
     #[test]
