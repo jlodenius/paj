@@ -99,9 +99,9 @@ export function formatSubagents(
       const attach = child.attachCommand.replace(/^TMUX= tmux /, "tmux ");
       return [
         `${style.name(child.name)} ${style.status(child.status)}`,
+        row("id", style.value(child.spawnId)),
         row("cwd", style.value(child.cwd)),
         row("prompt", style.value(child.task.split("\n", 1)[0])),
-        row("id", style.value(child.spawnId)),
         row("tmux", style.value(child.tmuxName)),
         row("attach", style.command(attach)),
       ].join("\n");
