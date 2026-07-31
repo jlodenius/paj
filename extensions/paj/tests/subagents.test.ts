@@ -7,7 +7,7 @@ import {
   formatSubagents,
   shouldStopSubagents,
   type SpawnRecord,
-} from "./subagents.ts";
+} from "../subagents.ts";
 
 const record: SpawnRecord = {
   spawnId: "spawn-id",

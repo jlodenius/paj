@@ -6,7 +6,7 @@ import {
   PROPOSAL_TOOL_NAME,
   proposalToolResult,
   setProposalToolActive,
-} from "./proposal-tool-state.ts";
+} from "../proposal-tool-state.ts";
 
 test("proposal guidance covers bridge response constraints", () => {
   assert.ok(

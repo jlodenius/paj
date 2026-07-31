@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { BridgeServer, type BridgeActions } from "./bridge.ts";
+import { BridgeServer, type BridgeActions } from "../bridge.ts";
 
 const REQUEST_ID = "019fa92e-a7c2-7072-84a7-8933262464a5";
 

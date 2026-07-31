@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { deliverPendingMessages } from "./message-delivery.ts";
+import { deliverPendingMessages } from "../message-delivery.ts";
 
 interface Message {
   id: string;

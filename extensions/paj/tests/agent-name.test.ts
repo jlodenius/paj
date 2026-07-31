@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { renamePajSession } from "./agent-name.ts";
+import { renamePajSession } from "../agent-name.ts";
 
 test("renaming invokes the Paj CLI for the active session", async () => {
   const calls: Array<{ args: string[]; cwd: string }> = [];
