@@ -28,6 +28,14 @@ struct PromptParams<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BridgeAction {
+    pub id: Uuid,
+    pub title: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "camelCase")]
 pub enum BridgeEvent {
     Accepted {
@@ -43,6 +51,7 @@ pub enum BridgeEvent {
         version: u8,
         id: Uuid,
         text: String,
+        actions: Vec<BridgeAction>,
     },
     Error {
         version: u8,
@@ -215,7 +224,7 @@ mod tests {
 
     use tempfile::{TempDir, tempdir};
 
-    use super::{BridgeClient, BridgeError, BridgeEvent};
+    use super::{BridgeAction, BridgeClient, BridgeError, BridgeEvent};
     use crate::project::Project;
     use crate::registry::{Registration, Registry, Session};
 
@@ -277,7 +286,7 @@ mod tests {
                 stream,
                 "{{\"event\":\"accepted\",\"version\":1,\"id\":\"{id}\"}}\n\
                  {{\"event\":\"delta\",\"version\":1,\"id\":\"{id}\",\"text\":\"hel\"}}\n\
-                 {{\"event\":\"complete\",\"version\":1,\"id\":\"{id}\",\"text\":\"hello\"}}\n"
+                 {{\"event\":\"complete\",\"version\":1,\"id\":\"{id}\",\"text\":\"hello\",\"actions\":[{{\"id\":\"019fa92e-a7c2-7072-84a7-8933262464a5\",\"title\":\"Improve it\",\"description\":\"Implement the improvement\"}}]}}\n"
             )
             .expect("events should be written");
         });
@@ -291,8 +300,57 @@ mod tests {
         assert!(matches!(events.as_slice(), [
             BridgeEvent::Accepted { .. },
             BridgeEvent::Delta { text, .. },
-            BridgeEvent::Complete { .. }
-        ] if text == "hel"));
+            BridgeEvent::Complete { actions, .. }
+        ] if text == "hel"
+            && actions.len() == 1
+            && actions[0].title == "Improve it"
+            && actions[0].description == "Implement the improvement"));
+    }
+
+    #[test]
+    fn complete_event_serializes_actions_with_camel_case_fields() {
+        let request_id = uuid::Uuid::now_v7();
+        let action_id = uuid::Uuid::now_v7();
+        let event = BridgeEvent::Complete {
+            version: 1,
+            id: request_id,
+            text: "response".to_owned(),
+            actions: vec![BridgeAction {
+                id: action_id,
+                title: "Change title".to_owned(),
+                description: "Change description".to_owned(),
+            }],
+        };
+
+        assert_eq!(
+            serde_json::to_value(event).expect("event should serialize"),
+            serde_json::json!({
+                "event": "complete",
+                "version": 1,
+                "id": request_id,
+                "text": "response",
+                "actions": [{
+                    "id": action_id,
+                    "title": "Change title",
+                    "description": "Change description"
+                }]
+            })
+        );
+    }
+
+    #[test]
+    fn complete_event_requires_actions_but_accepts_an_empty_array() {
+        let id = uuid::Uuid::now_v7();
+        let empty = format!(
+            "{{\"event\":\"complete\",\"version\":1,\"id\":\"{id}\",\"text\":\"done\",\"actions\":[]}}"
+        );
+        assert!(matches!(
+            serde_json::from_str::<BridgeEvent>(&empty),
+            Ok(BridgeEvent::Complete { actions, .. }) if actions.is_empty()
+        ));
+        let missing =
+            format!("{{\"event\":\"complete\",\"version\":1,\"id\":\"{id}\",\"text\":\"done\"}}");
+        assert!(serde_json::from_str::<BridgeEvent>(&missing).is_err());
     }
 
     #[test]

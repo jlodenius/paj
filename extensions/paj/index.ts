@@ -7,6 +7,7 @@ import { Type } from "typebox";
 import { renamePajSession } from "./agent-name.ts";
 import { BridgeServer } from "./bridge.ts";
 import { deliverPendingMessages } from "./message-delivery.ts";
+import { registerProposalTool } from "./proposal-tool.ts";
 
 interface PajMessage {
   id: string;
@@ -49,6 +50,12 @@ export default function pajExtension(pi: ExtensionAPI) {
   let lastMessagePollError: string | undefined;
   const deliveredMessageIds = new Set<string>();
   let shuttingDown = false;
+  const setProposalToolActive = registerProposalTool(pi, (actions) => {
+    if (!bridge) {
+      throw new Error("paj_propose_changes requires an active bridge request");
+    }
+    return bridge.submitProposals(actions);
+  });
 
   const execPaj = async (args: string[], cwd: string) => {
     const result = await pi.exec("paj", args, {
@@ -143,6 +150,7 @@ export default function pajExtension(pi: ExtensionAPI) {
           console.error("paj bridge shutdown failed", error),
         );
     }
+    setProposalToolActive(false);
     if (previousSessionId) {
       await execPaj(
         ["session", "unregister", previousSessionId],
@@ -191,6 +199,7 @@ export default function pajExtension(pi: ExtensionAPI) {
       isIdle: () => ctx.isIdle(),
       sendPrompt: (text) => pi.sendUserMessage(text),
       cancelPrompt: () => ctx.abort(),
+      setProposalToolActive,
     });
     try {
       await nextBridge.start(session.bridgeSocket);

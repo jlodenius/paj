@@ -154,7 +154,7 @@ fn bridge_prompt_reads_prompt_from_stdin() {
         write!(
             stream,
             "{{\"event\":\"accepted\",\"version\":1,\"id\":\"{id}\"}}\n\
-             {{\"event\":\"complete\",\"version\":1,\"id\":\"{id}\",\"text\":\"done\"}}\n"
+             {{\"event\":\"complete\",\"version\":1,\"id\":\"{id}\",\"text\":\"done\",\"actions\":[]}}\n"
         )
         .expect("events should be written");
     });
@@ -185,4 +185,80 @@ fn bridge_prompt_reads_prompt_from_stdin() {
 
     assert!(output.status.success());
     assert_eq!(output.stdout, b"done\n");
+}
+
+#[test]
+fn bridge_prompt_json_preserves_complete_actions() {
+    let runtime = tempdir().expect("runtime directory should be created");
+    let project = tempdir().expect("project directory should be created");
+    let registry = Registry::new(runtime.path().to_path_buf()).expect("registry should be created");
+    let project_metadata = Project::discover(project.path()).expect("project should be discovered");
+    let session = registry
+        .register(
+            &project_metadata,
+            Registration {
+                pid: std::process::id(),
+                pi_session_id: None,
+                name: Some("primary".to_owned()),
+                role: "primary".to_owned(),
+                task: None,
+                cwd: project.path().to_path_buf(),
+                branch: None,
+            },
+        )
+        .expect("session should register");
+    let listener = UnixListener::bind(
+        session
+            .bridge_socket
+            .as_ref()
+            .expect("session should advertise a socket"),
+    )
+    .expect("bridge socket should bind");
+    let action_id = uuid::Uuid::now_v7();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("client should connect");
+        let mut request = String::new();
+        BufReader::new(stream.try_clone().expect("stream should clone"))
+            .read_line(&mut request)
+            .expect("request should be read");
+        let request: serde_json::Value =
+            serde_json::from_str(&request).expect("request should be JSON");
+        let id = request["id"].as_str().expect("request should have an ID");
+        write!(
+            stream,
+            "{{\"event\":\"accepted\",\"version\":1,\"id\":\"{id}\"}}\n\
+             {{\"event\":\"complete\",\"version\":1,\"id\":\"{id}\",\"text\":\"done\",\"actions\":[{{\"id\":\"{action_id}\",\"title\":\"Change\",\"description\":\"Make the change\"}}]}}\n"
+        )
+        .expect("events should be written");
+    });
+
+    let output = paj()
+        .current_dir(project.path())
+        .env("PAJ_RUNTIME_DIR", runtime.path())
+        .args([
+            "--json",
+            "bridge",
+            "prompt",
+            &session.id.to_string(),
+            "--prompt",
+            "hello",
+            "--timeout",
+            "1",
+        ])
+        .output()
+        .expect("paj should run");
+    server.join().expect("server should finish");
+
+    assert!(output.status.success());
+    let events: Vec<serde_json::Value> = output
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).expect("event should be JSON"))
+        .collect();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[1]["event"], "complete");
+    assert_eq!(events[1]["actions"][0]["id"], action_id.to_string());
+    assert_eq!(events[1]["actions"][0]["title"], "Change");
+    assert_eq!(events[1]["actions"][0]["description"], "Make the change");
 }

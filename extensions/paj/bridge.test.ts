@@ -99,15 +99,165 @@ test("streams a correlated response without cancelling completed work", async ()
         ["accepted", "delta", "complete"],
       );
       assert.deepEqual(prompts, ["hello"]);
+      assert.deepEqual(events.at(-1)?.actions, []);
       assert.equal(cancellations, 0);
     },
   );
 });
 
+test("emits validated proposals atomically with generated unique IDs", async () => {
+  await withServer(actions(), async (socketPath, server) => {
+    const socket = await open(socketPath);
+    const eventsPromise = collect(socket);
+    socket.write(request() + "\n");
+    await new Promise<void>((resolve) => socket.once("data", () => resolve()));
+    server.onMessageUpdate({
+      assistantMessageEvent: { type: "text_delta", delta: "Consider these." },
+    });
+    server.onMessageEnd({
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "Consider these." }],
+      },
+    });
+    const submitted = server.submitProposals([
+      { title: "First", description: "Implement the first change." },
+      { title: "Second", description: "Implement the second change." },
+    ]);
+    assert.equal(submitted.length, 2);
+    assert.notEqual(submitted[0]?.id, submitted[1]?.id);
+    for (const action of submitted) {
+      assert.match(action.id, /^[0-9a-f-]{36}$/i);
+      assert.notEqual(action.id, action.title);
+    }
+    server.onAgentSettled();
+
+    const events = await eventsPromise;
+    assert.deepEqual(events.map((event) => event.event), [
+      "accepted",
+      "delta",
+      "complete",
+    ]);
+    assert.deepEqual(events.at(-1)?.actions, submitted);
+  });
+});
+
+test("rejects proposal misuse and invalid fields", async (t) => {
+  const inactive = new BridgeServer(actions());
+  assert.throws(() => inactive.submitProposals([]), /active bridge request/);
+
+  for (const [name, proposals, message] of [
+    ["not an array", {}, "must be an array"],
+    ["empty", [], "at least one action"],
+    [
+      "too many",
+      Array.from({ length: 21 }, () => ({ title: "t", description: "d" })),
+      "at most 20",
+    ],
+    ["empty title", [{ title: " ", description: "d" }], "title is required"],
+    [
+      "long title",
+      [{ title: "é".repeat(101), description: "d" }],
+      "title exceeds 200 bytes",
+    ],
+    [
+      "empty description",
+      [{ title: "t", description: "" }],
+      "description is required",
+    ],
+    [
+      "long description",
+      [{ title: "t", description: "é".repeat(2001) }],
+      "description exceeds 4000 bytes",
+    ],
+    [
+      "extra field",
+      [{ title: "t", description: "d", id: "model-id" }],
+      "is invalid",
+    ],
+  ] as const) {
+    await t.test(name, async () => {
+      await withServer(actions(), async (socketPath, server) => {
+        const socket = await open(socketPath);
+        const eventsPromise = collect(socket);
+        socket.write(request() + "\n");
+        await new Promise<void>((resolve) =>
+          socket.once("data", () => resolve()),
+        );
+        assert.throws(
+          () => server.submitProposals(proposals),
+          new RegExp(message),
+        );
+        server.onAgentSettled();
+        const events = await eventsPromise;
+        assert.deepEqual(events.at(-1)?.actions, []);
+      });
+    });
+  }
+});
+
+test("rejects repeated proposal calls", async () => {
+  await withServer(actions(), async (socketPath, server) => {
+    const socket = await open(socketPath);
+    const eventsPromise = collect(socket);
+    socket.write(request() + "\n");
+    await new Promise<void>((resolve) => socket.once("data", () => resolve()));
+    const proposal = [{ title: "Title", description: "Description" }];
+    server.submitProposals(proposal);
+    assert.throws(
+      () => server.submitProposals(proposal),
+      /only be called once/,
+    );
+    server.onAgentSettled();
+    await eventsPromise;
+  });
+});
+
+test("activates and cleans up the proposal tool across lifecycle outcomes", async (t) => {
+  await t.test("settled", async () => {
+    const states: boolean[] = [];
+    await withServer(
+      actions({ setProposalToolActive: (active) => states.push(active) }),
+      async (socketPath, server) => {
+        const socket = await open(socketPath);
+        const eventsPromise = collect(socket);
+        socket.write(request() + "\n");
+        await new Promise<void>((resolve) => socket.once("data", () => resolve()));
+        server.onAgentSettled();
+        await eventsPromise;
+      },
+    );
+    assert.deepEqual(states, [true, false]);
+  });
+
+  await t.test("prompt failure", async () => {
+    const states: boolean[] = [];
+    await withServer(
+      actions({
+        setProposalToolActive: (active) => states.push(active),
+        sendPrompt: () => {
+          throw new Error("failed");
+        },
+      }),
+      async (socketPath) => {
+        const socket = await open(socketPath);
+        const eventsPromise = collect(socket);
+        socket.write(request() + "\n");
+        await eventsPromise;
+      },
+    );
+    assert.deepEqual(states, [true, false]);
+  });
+});
+
 test("cancels exactly once when an accepted client disconnects", async () => {
   let cancellations = 0;
+  const states: boolean[] = [];
   await withServer(
-    actions({ cancelPrompt: () => cancellations++ }),
+    actions({
+      cancelPrompt: () => cancellations++,
+      setProposalToolActive: (active) => states.push(active),
+    }),
     async (socketPath) => {
       const socket = await open(socketPath);
       socket.write(request() + "\n");
@@ -124,6 +274,7 @@ test("cancels exactly once when an accepted client disconnects", async () => {
     },
   );
   assert.equal(cancellations, 1);
+  assert.deepEqual(states, [true, false]);
 });
 
 test("rejects null, arrays, malformed JSON, and malformed IDs without dispatch", async (t) => {

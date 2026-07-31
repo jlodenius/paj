@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { chmod, lstat, unlink } from "node:fs/promises";
 import { createServer, type Server, type Socket } from "node:net";
 
@@ -20,10 +21,22 @@ interface AssistantMessage {
   errorMessage?: string;
 }
 
+export interface ProposalAction {
+  id: string;
+  title: string;
+  description: string;
+}
+
+export interface ProposalInput {
+  title: string;
+  description: string;
+}
+
 interface ActiveRequest {
   id: string;
   socket: Socket;
   completedMessages: string[];
+  proposals?: ProposalAction[];
   lastError?: string;
 }
 
@@ -31,6 +44,7 @@ export interface BridgeActions {
   isIdle(): boolean;
   sendPrompt(text: string): void;
   cancelPrompt(): void;
+  setProposalToolActive?(active: boolean): void;
 }
 
 export class BridgeServer {
@@ -107,6 +121,27 @@ export class BridgeServer {
     }
   }
 
+  submitProposals(value: unknown): ProposalAction[] {
+    const active = this.active;
+    if (!active) {
+      throw new Error("paj_propose_changes requires an active bridge request");
+    }
+    if (active.proposals !== undefined) {
+      throw new Error("paj_propose_changes may only be called once per bridge request");
+    }
+    const proposals = validateProposals(value);
+    const ids = new Set<string>();
+    active.proposals = proposals.map((proposal) => {
+      let id: string;
+      do {
+        id = randomUUID();
+      } while (ids.has(id));
+      ids.add(id);
+      return { id, ...proposal };
+    });
+    return active.proposals;
+  }
+
   onAgentSettled(): void {
     const active = this.active;
     if (!active) {
@@ -123,15 +158,16 @@ export class BridgeServer {
       this.write(active.socket, {
         event: "complete",
         text: active.completedMessages.join("\n\n"),
+        actions: active.proposals ?? [],
       });
       active.socket.end();
     }
-    this.active = undefined;
+    this.finishRequest();
   }
 
   async stop(): Promise<void> {
     const active = this.active;
-    this.active = undefined;
+    this.finishRequest();
     if (active) {
       this.fail(
         active.socket,
@@ -187,7 +223,7 @@ export class BridgeServer {
     socket.on("close", () => {
       this.sockets.delete(socket);
       if (this.active?.socket === socket) {
-        this.active = undefined;
+        this.finishRequest();
         this.actions.cancelPrompt();
       }
     });
@@ -221,13 +257,22 @@ export class BridgeServer {
       socket,
       completedMessages: [],
     };
-    this.write(socket, { event: "accepted" });
     try {
+      this.actions.setProposalToolActive?.(true);
+      this.write(socket, { event: "accepted" });
       this.actions.sendPrompt(request.params.text);
     } catch (error) {
       this.fail(socket, request.id, "prompt_failed", String(error));
-      this.active = undefined;
+      this.finishRequest();
     }
+  }
+
+  private finishRequest(): void {
+    if (!this.active) {
+      return;
+    }
+    this.active = undefined;
+    this.actions.setProposalToolActive?.(false);
   }
 
   private fail(
@@ -307,6 +352,47 @@ function validateRequest(value: unknown): RequestValidation {
       params: { text: value.params.text },
     },
   };
+}
+
+function validateProposals(value: unknown): ProposalInput[] {
+  if (!Array.isArray(value)) {
+    throw new Error("paj_propose_changes actions must be an array");
+  }
+  if (value.length === 0) {
+    throw new Error("paj_propose_changes requires at least one action");
+  }
+  if (value.length > 20) {
+    throw new Error("paj_propose_changes accepts at most 20 actions");
+  }
+  return value.map((item, index) => {
+    if (
+      !isRecord(item) ||
+      typeof item.title !== "string" ||
+      typeof item.description !== "string" ||
+      Object.keys(item).some(
+        (key) => key !== "title" && key !== "description",
+      )
+    ) {
+      throw new Error(`paj_propose_changes action ${index + 1} is invalid`);
+    }
+    if (item.title.trim().length === 0) {
+      throw new Error(`paj_propose_changes action ${index + 1} title is required`);
+    }
+    if (Buffer.byteLength(item.title, "utf8") > 200) {
+      throw new Error(`paj_propose_changes action ${index + 1} title exceeds 200 bytes`);
+    }
+    if (item.description.trim().length === 0) {
+      throw new Error(
+        `paj_propose_changes action ${index + 1} description is required`,
+      );
+    }
+    if (Buffer.byteLength(item.description, "utf8") > 4000) {
+      throw new Error(
+        `paj_propose_changes action ${index + 1} description exceeds 4000 bytes`,
+      );
+    }
+    return { title: item.title, description: item.description };
+  });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
