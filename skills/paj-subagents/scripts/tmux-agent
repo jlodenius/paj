@@ -75,7 +75,11 @@ case "$command" in
     else
       root=$(paj project resolve "$PWD")
     fi
-    if [[ -z "$cwd" ]]; then cwd=$root; fi
+    if [[ -z "$cwd" ]]; then
+      cwd=$root
+    elif [[ -n "$project" && "$cwd" != /* ]]; then
+      cwd=$root/$cwd
+    fi
     cwd=$(python3 -c 'import os,sys; p=os.path.realpath(sys.argv[1]); assert os.path.isdir(p), p; print(p)' "$cwd")
     case "$cwd/" in "$root/"*) ;; *) echo "cwd $cwd is outside project root $root" >&2; exit 1;; esac
 
@@ -88,6 +92,10 @@ case "$command" in
     else
       printf '%s' "$task" >"$task_file"
     fi
+    python3 -c 'import sys; sys.exit(0 if open(sys.argv[1], encoding="utf-8").read().strip() else 1)' "$task_file" || {
+      echo "task cannot be empty or whitespace" >&2
+      exit 1
+    }
     record=$(paj --json subagent create --parent-pi-session-id "$PAJ_PI_SESSION_ID" --parent-pid "$PAJ_PI_SESSION_PID" --cwd "$cwd" --project-root "$root" --task-file "$task_file")
     spawn_id=$(printf '%s' "$record" | json_field spawnId)
     name=$(printf '%s' "$record" | json_field name)

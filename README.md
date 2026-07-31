@@ -94,7 +94,7 @@ Inside Pi, `/subagents` and `list_sub_agents` show only active children owned by
 
 Resolution first checks an absolute directory, each search root itself by exact basename, and `ROOT/REF`. Only when there are no direct matches does it recursively search for exact directory names or matching relative path suffixes. Recursive search prunes `.git`, `node_modules`, `.direnv`, and `target`. Canonical paths and containing Git roots are deduplicated, including results reached through overlapping roots. Zero matches fail; multiple distinct project roots fail and print candidates. Paj never selects a fuzzy or arbitrary match.
 
-`--project REF` selects the resolved project root. `--cwd DIR` selects an exact directory inside it; when used alone, its containing Git root (or the directory itself outside Git) becomes the project root.
+`--project REF` selects the resolved project root. With `--project`, a relative `--cwd DIR` is resolved from that root; absolute cwd values must still be inside it. When `--cwd` is used alone, its containing Git root (or the directory itself outside Git) becomes the project root.
 
 ## Editor and external-client bridge
 

@@ -58,6 +58,9 @@ impl SpawnStore {
         project_root: PathBuf,
         task: String,
     ) -> Result<SpawnRecord, SpawnError> {
+        if task.trim().is_empty() {
+            return Err(SpawnError::EmptyTask);
+        }
         let spawn_id = Uuid::now_v7();
         let compact = spawn_id.simple().to_string();
         let record = SpawnRecord {
@@ -140,13 +143,24 @@ impl SpawnStore {
         let records = self.list(None, false)?;
         let mut removed = Vec::new();
         for record in records {
-            if process_is_alive(record.parent_pid) {
+            let tmux_exists = tmux_session_exists(&record.tmux_name);
+            if tmux_exists && process_is_alive(record.parent_pid) {
                 continue;
             }
-            if tmux_session_exists(&record.tmux_name) {
-                let _ = Command::new("tmux")
-                    .args(["-L", "paj", "kill-session", "-t", &record.tmux_name])
-                    .status();
+            if tmux_exists {
+                let killed = Command::new("tmux")
+                    .args([
+                        "-L",
+                        "paj",
+                        "kill-session",
+                        "-t",
+                        &format!("={}", record.tmux_name),
+                    ])
+                    .status()
+                    .is_ok_and(|status| status.success());
+                if !killed && tmux_session_exists(&record.tmux_name) {
+                    continue;
+                }
             }
             if self.path(record.spawn_id).exists() {
                 self.remove(record.spawn_id)?;
@@ -218,6 +232,8 @@ pub enum SpawnError {
     MissingRuntimeDirectory,
     #[error("subagent spawn {0} was not found")]
     NotFound(Uuid),
+    #[error("subagent task cannot be empty or whitespace")]
+    EmptyTask,
     #[error("system clock is earlier than the Unix epoch")]
     InvalidSystemTime(#[from] SystemTimeError),
     #[error("timestamp does not fit in a 64-bit integer")]
@@ -318,7 +334,7 @@ mod tests {
     }
 
     #[test]
-    fn gc_preserves_records_owned_by_a_live_parent() {
+    fn gc_removes_a_missing_tmux_session_even_with_a_live_parent() {
         let directory = tempdir().expect("temporary directory should be created");
         let store = SpawnStore::new(directory.path().join("paj")).expect("store should be created");
         let record = store
@@ -331,10 +347,23 @@ mod tests {
             )
             .expect("record should be created");
 
-        assert!(store.gc().expect("gc should succeed").is_empty());
-        assert_eq!(
-            store.show(record.spawn_id).expect("record should remain"),
-            record
+        assert_eq!(store.gc().expect("gc should succeed"), vec![record.clone()]);
+        assert!(store.show(record.spawn_id).is_err());
+    }
+
+    #[test]
+    fn create_rejects_an_empty_task() {
+        let directory = tempdir().expect("temporary directory should be created");
+        let store = SpawnStore::new(directory.path().join("paj")).expect("store should be created");
+
+        let result = store.create(
+            "parent".to_owned(),
+            std::process::id(),
+            directory.path().to_path_buf(),
+            directory.path().to_path_buf(),
+            "  \n".to_owned(),
         );
+
+        assert!(matches!(result, Err(super::SpawnError::EmptyTask)));
     }
 }

@@ -13,6 +13,7 @@ import {
   setPajSessionStatus,
 } from "./session-status.ts";
 import {
+  cleanupSubagents,
   combineSubagents,
   formatSubagents,
   shouldStopSubagents,
@@ -397,14 +398,24 @@ export default function pajExtension(pi: ExtensionAPI) {
 
   const stopSubagents = async (ctx: ExtensionContext) => {
     const children = await listSubagents(ctx);
-    for (const child of children) {
-      await pi.exec(
-        "tmux",
-        ["-L", "paj", "kill-session", "-t", `=${child.tmuxName}`],
-        { cwd: ctx.cwd, timeout: COMMAND_TIMEOUT_MS },
-      );
-      await execPaj(["subagent", "remove", child.spawnId], ctx.cwd);
-    }
+    await cleanupSubagents(
+      children,
+      async (child) => {
+        const result = await pi.exec(
+          "tmux",
+          ["-L", "paj", "kill-session", "-t", `=${child.tmuxName}`],
+          { cwd: ctx.cwd, timeout: COMMAND_TIMEOUT_MS },
+        );
+        if (result.code !== 0) {
+          throw new Error(
+            result.stderr.trim() || `failed to stop tmux session ${child.tmuxName}`,
+          );
+        }
+      },
+      async (child) => {
+        await execPaj(["subagent", "remove", child.spawnId], ctx.cwd);
+      },
+    );
   };
 
   pi.on("session_start", async (_event, ctx) => {

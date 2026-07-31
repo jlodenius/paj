@@ -45,6 +45,33 @@ export function shouldStopSubagents(reason: string): boolean {
   return reason !== "reload";
 }
 
+export async function cleanupSubagents(
+  subagents: ListedSubagent[],
+  kill: (subagent: ListedSubagent) => Promise<void>,
+  remove: (subagent: ListedSubagent) => Promise<void>,
+): Promise<void> {
+  const errors: unknown[] = [];
+  for (const subagent of subagents) {
+    try {
+      await kill(subagent);
+    } catch (error) {
+      errors.push(error);
+      continue;
+    }
+    try {
+      await remove(subagent);
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  if (errors.length) {
+    throw new AggregateError(
+      errors,
+      `Failed to clean up ${errors.length} subagent operation(s)`,
+    );
+  }
+}
+
 export function formatSubagents(subagents: ListedSubagent[]): string {
   return subagents
     .map(

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  cleanupSubagents,
   combineSubagents,
   formatSubagents,
   shouldStopSubagents,
@@ -41,6 +42,32 @@ test("shutdown cleanup preserves children only for reload", () => {
   for (const reason of ["quit", "new", "resume", "fork"]) {
     assert.equal(shouldStopSubagents(reason), true);
   }
+});
+
+test("cleanup attempts later children after a record removal fails", async () => {
+  const children = combineSubagents(
+    [record, { ...record, spawnId: "spawn-two", tmuxName: "paj-two" }],
+    [],
+  );
+  const killed: string[] = [];
+  const removed: string[] = [];
+
+  await assert.rejects(
+    cleanupSubagents(
+      children,
+      async (child) => {
+        killed.push(child.spawnId);
+      },
+      async (child) => {
+        removed.push(child.spawnId);
+        if (child.spawnId === "spawn-id") throw new Error("remove failed");
+      },
+    ),
+    AggregateError,
+  );
+
+  assert.deepEqual(killed, ["spawn-id", "spawn-two"]);
+  assert.deepEqual(removed, ["spawn-id", "spawn-two"]);
 });
 
 test("an unregistered child is shown as starting", () => {
