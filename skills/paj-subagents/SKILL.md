@@ -7,6 +7,8 @@ description: Spawn or delegate work to tmux-backed Pi subagents, including when 
 
 Use `scripts/tmux-agent` from this skill directory. Run `resolve` when a project reference is not already an exact path; never guess among candidates. Before spawning, clarify the task and project when either is ambiguous, and follow the target repository's rules.
 
+## Command reference
+
 Pass tasks with `--task` or, for complex text, a private `--task-file`:
 
 ```sh
