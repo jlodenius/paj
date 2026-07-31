@@ -413,6 +413,16 @@ export default function pajExtension(pi: ExtensionAPI) {
         }
       },
       async (child) => {
+        if (child.childPajSessionId) {
+          await execPaj(
+            ["session", "unregister", child.childPajSessionId],
+            ctx.cwd,
+          ).catch((error: unknown) => {
+            if (!isMissingSessionError(error)) {
+              throw error;
+            }
+          });
+        }
         await execPaj(["subagent", "remove", child.spawnId], ctx.cwd);
       },
     );

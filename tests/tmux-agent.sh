@@ -15,6 +15,10 @@ trap cleanup EXIT
 mkdir -p "$projects/group/example/src"
 cat >"$bin/pi" <<'EOF'
 #!/usr/bin/env bash
+session=$(paj --json session register --pid $$ --pi-session-id "child-$PAJ_SPAWN_ID" --name "$PAJ_AGENT_NAME" --role "$PAJ_ROLE" --parent-pi-session-id "$PAJ_PARENT_PI_SESSION_ID" --cwd "$PWD")
+session_id=$(printf '%s' "$session" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+paj subagent bind "$PAJ_SPAWN_ID" --child-pi-session-id "child-$PAJ_SPAWN_ID" --child-paj-session-id "$session_id" --name "$PAJ_AGENT_NAME" >/dev/null
+printf '%s\n' "$session_id" >"$PAJ_RUNTIME_DIR/child-session-id"
 printf '%s\n' "$PWD" "$PAJ_ROLE" "$PAJ_PARENT_PI_SESSION_ID" "$PAJ_SPAWN_ID" "$PAJ_AGENT_NAME" "$PAJ_TASK" >"$PAJ_RUNTIME_DIR/child-observed"
 printf '%s\n' "$@" >"$PAJ_RUNTIME_DIR/child-args"
 sleep 30
@@ -46,9 +50,12 @@ test -n "$spawn_id"
 test -n "$tmux_id"
 grep -q '^attach: TMUX= tmux -L paj attach-session -t =' <<<"$output"
 
-for _ in $(seq 1 50); do [[ -f "$runtime/child-observed" && -f "$runtime/child-args" ]] && break; sleep 0.1; done
+for _ in $(seq 1 50); do [[ -f "$runtime/child-observed" && -f "$runtime/child-args" && -f "$runtime/child-session-id" ]] && break; sleep 0.1; done
 test -f "$runtime/child-observed"
 test -f "$runtime/child-args"
+test -f "$runtime/child-session-id"
+child_session_id=$(<"$runtime/child-session-id")
+paj session show "$child_session_id" >/dev/null
 test ! -e /tmp/paj-should-not-exist
 grep -Fqx "$(realpath "$projects/group/example/src")" "$runtime/child-observed"
 grep -qx 'subagent' "$runtime/child-observed"
@@ -68,8 +75,12 @@ paj --json subagent list --all | grep -q "$spawn_id"
 $helper stop "$spawn_id"
 ! tmux -L paj has-session -t "=$tmux_id" 2>/dev/null
 ! paj --json subagent list --all | grep -q "$spawn_id"
+if paj session show "$child_session_id" >/dev/null 2>&1; then
+  echo "stopped child remained registered" >&2
+  exit 1
+fi
 
-rm "$runtime/child-observed" "$runtime/child-args"
+rm "$runtime/child-observed" "$runtime/child-args" "$runtime/child-session-id"
 output=$($helper spawn --project example --task 'default model')
 spawn_id=$(awk '/^spawnId:/ {print $2}' <<<"$output")
 for _ in $(seq 1 50); do [[ -f "$runtime/child-args" ]] && break; sleep 0.1; done

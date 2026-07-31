@@ -32,6 +32,22 @@ json_field() {
   python3 -c 'import json,sys; v=json.load(sys.stdin); print(v[sys.argv[1]])' "$1"
 }
 
+json_optional_field() {
+  python3 -c 'import json,sys; v=json.load(sys.stdin).get(sys.argv[1]); print(v if v is not None else "")' "$1"
+}
+
+unregister_child() {
+  local session_id=$1
+  [[ -n "$session_id" ]] || return 0
+  local error
+  if ! error=$(paj session unregister "$session_id" 2>&1); then
+    case "$error" in
+      *"session $session_id was not found"*) ;;
+      *) printf '%s\n' "$error" >&2; return 1 ;;
+    esac
+  fi
+}
+
 records() {
   paj --json subagent list
 }
@@ -159,17 +175,23 @@ EOF
   stop)
     [[ $# -eq 1 ]] || usage
     if [[ "$1" == --all ]]; then
-      records | python3 -c 'import json,sys; [print(x["spawnId"], x["tmuxName"], sep="\t") for x in json.load(sys.stdin)]' |
-      while IFS=$'\t' read -r spawn_id tmux_name; do
+      failed=0
+      while IFS=$'\t' read -r spawn_id tmux_name child_paj_session_id; do
         tmux -L paj kill-session -t "=$tmux_name" 2>/dev/null || true
-        paj subagent remove "$spawn_id" >/dev/null || true
-        rm -rf "$runtime/subagent-launchers/$spawn_id"
-      done
+        if unregister_child "$child_paj_session_id" && paj subagent remove "$spawn_id" >/dev/null; then
+          rm -rf "$runtime/subagent-launchers/$spawn_id"
+        else
+          failed=1
+        fi
+      done < <(records | python3 -c 'import json,sys; [print(x["spawnId"], x["tmuxName"], x.get("childPajSessionId") or "", sep="\t") for x in json.load(sys.stdin)]')
+      [[ $failed -eq 0 ]]
     else
       record=$(select_record "$1")
       spawn_id=$(printf '%s' "$record" | json_field spawnId)
       tmux_name=$(printf '%s' "$record" | json_field tmuxName)
+      child_paj_session_id=$(printf '%s' "$record" | json_optional_field childPajSessionId)
       tmux -L paj kill-session -t "=$tmux_name"
+      unregister_child "$child_paj_session_id"
       paj subagent remove "$spawn_id" >/dev/null
       rm -rf "$runtime/subagent-launchers/$spawn_id"
     fi
