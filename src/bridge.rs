@@ -244,6 +244,7 @@ mod tests {
                     pi_session_id: None,
                     name: Some("primary".to_owned()),
                     role: "primary".to_owned(),
+                    parent_pi_session_id: None,
                     task: None,
                     cwd: directory.path().to_path_buf(),
                     branch: None,

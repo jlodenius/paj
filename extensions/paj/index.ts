@@ -12,6 +12,13 @@ import {
   type PajSessionStatus,
   setPajSessionStatus,
 } from "./session-status.ts";
+import {
+  combineSubagents,
+  formatSubagents,
+  shouldStopSubagents,
+  type ListedSubagent,
+  type SpawnRecord,
+} from "./subagents.ts";
 
 interface PajMessage {
   id: string;
@@ -29,6 +36,7 @@ interface PajSession {
   projectRoot: string;
   branch?: string;
   role: string;
+  parentPiSessionId?: string;
   task?: string;
   status: string;
   bridgeSocket?: string;
@@ -107,6 +115,23 @@ export default function pajExtension(pi: ExtensionAPI) {
       throw new Error("paj registration changed while renaming");
     }
     registeredName = session.name;
+    const spawnId = process.env.PAJ_SPAWN_ID;
+    if (spawnId) {
+      await execPaj(
+        [
+          "subagent",
+          "bind",
+          spawnId,
+          "--child-pi-session-id",
+          process.env.PAJ_PI_SESSION_ID ?? "",
+          "--child-paj-session-id",
+          session.id,
+          "--name",
+          session.name,
+        ],
+        cwd,
+      );
+    }
     return session.name;
   };
 
@@ -189,6 +214,10 @@ export default function pajExtension(pi: ExtensionAPI) {
     if (name) {
       args.push("--name", name);
     }
+    const parentPiSessionId = process.env.PAJ_PARENT_PI_SESSION_ID;
+    if (parentPiSessionId) {
+      args.push("--parent-pi-session-id", parentPiSessionId);
+    }
     const task = process.env.PAJ_TASK;
     if (task) {
       args.push("--task", task);
@@ -219,6 +248,23 @@ export default function pajExtension(pi: ExtensionAPI) {
     bridge = nextBridge;
     activeSessionId = session.id;
     registeredName = session.name;
+    const spawnId = process.env.PAJ_SPAWN_ID;
+    if (spawnId) {
+      await execPaj(
+        [
+          "subagent",
+          "bind",
+          spawnId,
+          "--child-pi-session-id",
+          ctx.sessionManager.getSessionId(),
+          "--child-paj-session-id",
+          session.id,
+          "--name",
+          session.name,
+        ],
+        ctx.cwd,
+      );
+    }
     if (session.status !== desiredStatus) {
       await queueStatusUpdate(ctx, desiredStatus);
     }
@@ -337,8 +383,34 @@ export default function pajExtension(pi: ExtensionAPI) {
     return JSON.parse(await execPaj(command, cwd)) as PajSession[];
   };
 
+  const listSubagents = async (ctx: ExtensionContext): Promise<ListedSubagent[]> => {
+    const parentPiSessionId = ctx.sessionManager.getSessionId();
+    const [recordsOutput, sessions] = await Promise.all([
+      execPaj(
+        ["--json", "subagent", "list", "--parent-pi-session-id", parentPiSessionId],
+        ctx.cwd,
+      ),
+      listAgents(true, ctx.cwd),
+    ]);
+    return combineSubagents(JSON.parse(recordsOutput) as SpawnRecord[], sessions);
+  };
+
+  const stopSubagents = async (ctx: ExtensionContext) => {
+    const children = await listSubagents(ctx);
+    for (const child of children) {
+      await pi.exec(
+        "tmux",
+        ["-L", "paj", "kill-session", "-t", `=${child.tmuxName}`],
+        { cwd: ctx.cwd, timeout: COMMAND_TIMEOUT_MS },
+      );
+      await execPaj(["subagent", "remove", child.spawnId], ctx.cwd);
+    }
+  };
+
   pi.on("session_start", async (_event, ctx) => {
     shuttingDown = false;
+    process.env.PAJ_PI_SESSION_ID = ctx.sessionManager.getSessionId();
+    process.env.PAJ_PI_SESSION_PID = String(process.pid);
     heartbeatTimer = setInterval(() => {
       const sessionId = activeSessionId;
       if (!sessionId || heartbeatPending) {
@@ -418,8 +490,13 @@ export default function pajExtension(pi: ExtensionAPI) {
     await queueStatusUpdate(ctx, "idle").catch(() => undefined);
   });
 
-  pi.on("session_shutdown", async (_event, ctx) => {
+  pi.on("session_shutdown", async (event, ctx) => {
     shuttingDown = true;
+    if (shouldStopSubagents(event.reason)) {
+      await stopSubagents(ctx).catch((error: unknown) =>
+        console.error("paj subagent cleanup failed", error),
+      );
+    }
     if (heartbeatTimer) {
       clearInterval(heartbeatTimer);
       heartbeatTimer = undefined;
@@ -522,11 +599,29 @@ export default function pajExtension(pi: ExtensionAPI) {
           const current = session.pid === process.pid ? "*" : " ";
           const branch = session.branch ?? "no branch";
           const task = session.task ? ` — ${session.task}` : "";
-          return `${current} ${session.name} [${session.role}/${session.status}] ${branch}${task}`;
+          const parent = session.parentPiSessionId
+            ? ` parent:${session.parentPiSessionId}`
+            : "";
+          return `${current} ${session.name} [${session.role}/${session.status}]${parent} ${branch}${task}`;
         });
         ctx.ui.notify(lines.join("\n"), "info");
       } catch (error) {
         ctx.ui.notify(`Failed to list agents: ${String(error)}`, "error");
+      }
+    },
+  });
+
+  pi.registerCommand("subagents", {
+    description: "List active tmux subagents owned by this Pi session",
+    handler: async (_args, ctx) => {
+      try {
+        const children = await listSubagents(ctx);
+        ctx.ui.notify(
+          children.length ? formatSubagents(children) : "No active subagents found",
+          "info",
+        );
+      } catch (error) {
+        ctx.ui.notify(`Failed to list subagents: ${String(error)}`, "error");
       }
     },
   });
@@ -564,9 +659,23 @@ export default function pajExtension(pi: ExtensionAPI) {
   });
 
   pi.registerTool({
+    name: "list_sub_agents",
+    label: "List subagents",
+    description: "List active tmux subagents owned by this Pi session with status and attach commands",
+    parameters: Type.Object({}),
+    async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+      const subagents = await listSubagents(ctx);
+      return {
+        content: [{ type: "text", text: JSON.stringify(subagents, null, 2) }],
+        details: { subagents },
+      };
+    },
+  });
+
+  pi.registerTool({
     name: "send_agent_message",
     label: "Send agent message",
-    description: "Send a message to another live Pi agent listed by /agents",
+    description: "Send a message to another live Pi agent by name, Paj ID, or exact Pi session ID",
     parameters: Type.Object({
       recipient: Type.String({ description: "Agent name or session ID" }),
       text: Type.String({ description: "Message to send" }),

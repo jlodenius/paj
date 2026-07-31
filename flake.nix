@@ -21,6 +21,10 @@
         src = self;
 
         cargoLock.lockFile = ./Cargo.lock;
+        propagatedBuildInputs = [
+          pkgs.python3
+          pkgs.tmux
+        ];
 
         meta = {
           description = "Local session discovery, messaging, and editor bridge for Pi coding agents";

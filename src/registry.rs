@@ -27,6 +27,8 @@ pub struct Session {
     pub cwd: PathBuf,
     pub branch: Option<String>,
     pub role: String,
+    #[serde(default)]
+    pub parent_pi_session_id: Option<String>,
     pub task: Option<String>,
     pub status: String,
     #[serde(default)]
@@ -41,6 +43,7 @@ pub struct Registration {
     pub pi_session_id: Option<String>,
     pub name: Option<String>,
     pub role: String,
+    pub parent_pi_session_id: Option<String>,
     pub task: Option<String>,
     pub cwd: PathBuf,
     pub branch: Option<String>,
@@ -106,6 +109,7 @@ impl Registry {
             cwd: registration.cwd,
             branch: registration.branch,
             role: registration.role,
+            parent_pi_session_id: registration.parent_pi_session_id,
             task: registration.task,
             status: "idle".to_owned(),
             bridge_socket: None,
@@ -315,7 +319,9 @@ impl Registry {
             .list_live(None, Duration::from_secs(60))?
             .into_iter()
             .filter(|session| {
-                session.name == reference || session.id.to_string().starts_with(reference)
+                session.name == reference
+                    || session.pi_session_id.as_deref() == Some(reference)
+                    || session.id.to_string().starts_with(reference)
             })
             .collect::<Vec<_>>();
         match matches.as_slice() {
@@ -505,6 +511,7 @@ mod tests {
             pi_session_id: Some("pi-session-id".to_owned()),
             name: Some("primary".to_owned()),
             role: "primary".to_owned(),
+            parent_pi_session_id: None,
             task: None,
             cwd: "/project".into(),
             branch: Some("master".to_owned()),
@@ -801,6 +808,28 @@ mod tests {
         let message = registry
             .send_message(sender.id, reference, "hello".to_owned())
             .expect("recipient prefix should resolve");
+
+        assert_eq!(message.to, recipient.id);
+    }
+
+    #[test]
+    fn send_message_resolves_exact_pi_session_id() {
+        let directory = tempdir().expect("temporary directory should be created");
+        let registry =
+            Registry::new(directory.path().join("paj")).expect("registry should be created");
+        let sender = registry
+            .register(&project(), registration(std::process::id()))
+            .expect("sender should register");
+        let mut recipient_registration = registration(std::process::id());
+        recipient_registration.name = Some("recipient".to_owned());
+        recipient_registration.pi_session_id = Some("stable-pi-session".to_owned());
+        let recipient = registry
+            .register(&project(), recipient_registration)
+            .expect("recipient should register");
+
+        let message = registry
+            .send_message(sender.id, "stable-pi-session", "done".to_owned())
+            .expect("exact Pi session ID should resolve");
 
         assert_eq!(message.to, recipient.id);
     }

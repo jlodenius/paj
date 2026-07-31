@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat >&2 <<'EOF'
+Usage:
+  tmux-agent spawn [--project REF] [--cwd DIR] (--task TEXT | --task-file FILE)
+  tmux-agent resolve PROJECT
+  tmux-agent list
+  tmux-agent attach SPAWN_ID_OR_NAME
+  tmux-agent stop SPAWN_ID_OR_NAME
+  tmux-agent stop --all
+EOF
+  exit 2
+}
+
+command=${1:-}
+[[ -n "$command" ]] || usage
+shift
+if [[ "$command" == resolve ]]; then
+  [[ $# -eq 1 ]] || usage
+  exec paj project resolve "$1"
+fi
+
+runtime=${PAJ_RUNTIME_DIR:-${XDG_RUNTIME_DIR:+$XDG_RUNTIME_DIR/paj}}
+[[ -n "$runtime" ]] || { echo "XDG_RUNTIME_DIR is not set; set it or PAJ_RUNTIME_DIR" >&2; exit 1; }
+umask 077
+mkdir -p "$runtime/subagent-launchers"
+chmod 700 "$runtime" "$runtime/subagent-launchers"
+
+json_field() {
+  python3 -c 'import json,sys; v=json.load(sys.stdin); print(v[sys.argv[1]])' "$1"
+}
+
+records() {
+  paj --json subagent list
+}
+
+select_record() {
+  local reference=$1
+  records | python3 -c '
+import json,sys
+ref=sys.argv[1]
+items=json.load(sys.stdin)
+matches=[x for x in items if x["spawnId"].startswith(ref) or x["name"] == ref or x["tmuxName"] == ref]
+if len(matches) != 1:
+ print(("no active subagent matches " if not matches else "ambiguous subagent reference ")+ref, file=sys.stderr)
+ sys.exit(1)
+json.dump(matches[0],sys.stdout)
+' "$reference"
+}
+
+case "$command" in
+  spawn)
+    project=
+    cwd=
+    task=
+    task_source=
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --project) [[ $# -ge 2 ]] || usage; project=$2; shift 2 ;;
+        --cwd) [[ $# -ge 2 ]] || usage; cwd=$2; shift 2 ;;
+        --task) [[ $# -ge 2 && -z "$task_source" ]] || usage; task=$2; task_source=text; shift 2 ;;
+        --task-file) [[ $# -ge 2 && -z "$task_source" ]] || usage; task=$2; task_source=file; shift 2 ;;
+        *) usage ;;
+      esac
+    done
+    [[ -n "$task_source" ]] || usage
+    [[ -n "${PAJ_PI_SESSION_ID:-}" ]] || { echo "PAJ_PI_SESSION_ID is unavailable; spawn from a Paj-enabled Pi session" >&2; exit 1; }
+    [[ -n "${PAJ_PI_SESSION_PID:-}" ]] || { echo "PAJ_PI_SESSION_PID is unavailable" >&2; exit 1; }
+    if [[ -n "$project" ]]; then
+      root=$(paj project resolve "$project")
+    elif [[ -n "$cwd" ]]; then
+      root=$(paj project resolve "$cwd")
+    else
+      root=$(paj project resolve "$PWD")
+    fi
+    if [[ -z "$cwd" ]]; then cwd=$root; fi
+    cwd=$(python3 -c 'import os,sys; p=os.path.realpath(sys.argv[1]); assert os.path.isdir(p), p; print(p)' "$cwd")
+    case "$cwd/" in "$root/"*) ;; *) echo "cwd $cwd is outside project root $root" >&2; exit 1;; esac
+
+    staging=$(mktemp -d "$runtime/subagent-launchers/.spawn.XXXXXX")
+    trap 'rm -rf "${staging:-}"' EXIT
+    task_file=$staging/task
+    if [[ "$task_source" == file ]]; then
+      [[ -f "$task" ]] || { echo "task file does not exist: $task" >&2; exit 1; }
+      cp -- "$task" "$task_file"
+    else
+      printf '%s' "$task" >"$task_file"
+    fi
+    record=$(paj --json subagent create --parent-pi-session-id "$PAJ_PI_SESSION_ID" --parent-pid "$PAJ_PI_SESSION_PID" --cwd "$cwd" --project-root "$root" --task-file "$task_file")
+    spawn_id=$(printf '%s' "$record" | json_field spawnId)
+    name=$(printf '%s' "$record" | json_field name)
+    tmux_name=$(printf '%s' "$record" | json_field tmuxName)
+    directory=$runtime/subagent-launchers/$spawn_id
+    mv "$staging" "$directory"
+    staging=
+    prompt=$directory/prompt
+    launcher=$directory/launch.py
+    environment=$directory/environment
+    {
+      printf 'You are a Paj subagent. Work only on the task below. Clarify uncertainties rather than guessing; resolve the exact project and obey all repository rules. When complete, report results, checks, caveats, your Pi session ID, Paj name, spawn ID, and project root to parent Pi session %s using send_agent_message. Do not manually acknowledge messages.\n\nTask:\n' "$PAJ_PI_SESSION_ID"
+      cat "$directory/task"
+    } >"$prompt"
+    env -0 >"$environment"
+    cat >"$launcher" <<'EOF'
+import os
+import sys
+
+environment, prompt, name, spawn, parent, task_file = sys.argv[1:]
+for item in open(environment, "rb").read().split(b"\0"):
+    if item and b"=" in item:
+        key, value = item.split(b"=", 1)
+        os.environ[os.fsdecode(key)] = os.fsdecode(value)
+os.environ.pop("TMUX", None)
+os.environ.pop("TMUX_PANE", None)
+os.environ.update({
+    "PAJ_ROLE": "subagent",
+    "PAJ_PARENT_PI_SESSION_ID": parent,
+    "PAJ_SPAWN_ID": spawn,
+    "PAJ_AGENT_NAME": name,
+    "PAJ_TASK": open(task_file, encoding="utf-8").read(),
+})
+os.execvp("pi", ["pi", "--name", name, open(prompt, encoding="utf-8").read()])
+EOF
+    chmod 600 "$directory/task" "$prompt" "$environment" "$launcher"
+    python3_path=$(command -v python3)
+    if ! tmux -L paj new-session -d -s "$tmux_name" -c "$cwd" "$python3_path" "$launcher" "$environment" "$prompt" "$name" "$spawn_id" "$PAJ_PI_SESSION_ID" "$directory/task"; then
+      paj subagent remove "$spawn_id" >/dev/null || true
+      rm -rf "$directory"
+      exit 1
+    fi
+    printf 'spawnId: %s\nname: %s\ntmuxId: %s\nroot: %s\nattach: TMUX= tmux -L paj attach-session -t =%s\n' "$spawn_id" "$name" "$tmux_name" "$root" "$tmux_name"
+    ;;
+  list)
+    [[ $# -eq 0 ]] || usage
+    paj subagent list
+    ;;
+  attach)
+    [[ $# -eq 1 ]] || usage
+    record=$(select_record "$1")
+    tmux_name=$(printf '%s' "$record" | json_field tmuxName)
+    exec env -u TMUX tmux -L paj attach-session -t "=$tmux_name"
+    ;;
+  stop)
+    [[ $# -eq 1 ]] || usage
+    if [[ "$1" == --all ]]; then
+      records | python3 -c 'import json,sys; [print(x["spawnId"], x["tmuxName"], sep="\t") for x in json.load(sys.stdin)]' |
+      while IFS=$'\t' read -r spawn_id tmux_name; do
+        tmux -L paj kill-session -t "=$tmux_name" 2>/dev/null || true
+        paj subagent remove "$spawn_id" >/dev/null || true
+        rm -rf "$runtime/subagent-launchers/$spawn_id"
+      done
+    else
+      record=$(select_record "$1")
+      spawn_id=$(printf '%s' "$record" | json_field spawnId)
+      tmux_name=$(printf '%s' "$record" | json_field tmuxName)
+      tmux -L paj kill-session -t "=$tmux_name"
+      paj subagent remove "$spawn_id" >/dev/null
+      rm -rf "$runtime/subagent-launchers/$spawn_id"
+    fi
+    ;;
+  *) usage ;;
+esac
