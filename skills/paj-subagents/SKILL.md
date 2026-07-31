@@ -5,6 +5,15 @@ description: Spawn and manage tmux-backed Pi subagents for parallel work and red
 
 # Paj Subagents
 
+## Spawn requests are literal
+
+When the user says to **spawn**, **start**, **create**, or **launch** agents, create new child agents with this skill's `scripts/tmux-agent spawn` command. A named project specifies where the new children must run; it is not a request to find or message an existing agent in that project.
+
+- Do not substitute an already-running agent for a requested new agent.
+- Do not ask another agent to perform the spawn on your behalf.
+- Spawn one child per requested agent. Treat “some” or “a few” as three unless context indicates another count.
+- Use Paj discovery or messaging only if the user explicitly asks to contact or reuse existing agents.
+
 Use `scripts/tmux-agent` from the directory containing this `SKILL.md` (`paj-subagents`, not the sibling `paj` skill). Before invoking it, resolve that relative path against this skill's own location and use the resulting absolute path. Run `resolve` when a project reference is not already an exact path; never guess among candidates. Before spawning, clarify the task and project when either is ambiguous, and follow the target repository's rules.
 
 ## Script reference
