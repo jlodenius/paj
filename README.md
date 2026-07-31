@@ -77,6 +77,7 @@ The `paj-subagents` skill delegates explicit or optional parallel work through i
 
 ```sh
 skills/paj-subagents/scripts/tmux-agent spawn --project paj --task "Run the parser tests"
+skills/paj-subagents/scripts/tmux-agent spawn --project paj --model anthropic/claude-sonnet-4 --task "Review the parser"
 skills/paj-subagents/scripts/tmux-agent spawn --cwd /exact/project/path --task-file /private/task
 skills/paj-subagents/scripts/tmux-agent list
 skills/paj-subagents/scripts/tmux-agent attach <spawn-id-or-name>
@@ -84,7 +85,7 @@ skills/paj-subagents/scripts/tmux-agent stop <spawn-id-or-name>
 skills/paj-subagents/scripts/tmux-agent stop --all
 ```
 
-Sessions are scoped to `tmux -L paj`. Spawn output includes the spawn ID, synchronized Pi/Paj agent name, tmux ID, project root, and a copyable `TMUX= tmux -L paj attach-session ...` command that also works from another tmux server. Tasks are copied into mode-0600 runtime files and passed as data, never evaluated as shell. Completed children stay open for follow-up until stopped. Private records under the Paj runtime tree associate each spawn with its stable parent Pi session ID and PID, child identities, task, cwd/root, tmux name, and timestamps.
+Sessions are scoped to `tmux -L paj`. `spawn --model MODEL` forwards Pi's model pattern, including `provider/id` and optional `:thinking` syntax, to the child. Spawn output includes the spawn ID, synchronized Pi/Paj agent name, tmux ID, project root, and a copyable `TMUX= tmux -L paj attach-session ...` command that also works from another tmux server. Tasks are copied into mode-0600 runtime files and passed as data, never evaluated as shell. Completed children stay open for follow-up until stopped. Private records under the Paj runtime tree associate each spawn with its stable parent Pi session ID and PID, child identities, task, cwd/root, tmux name, and timestamps.
 
 Inside Pi, `/subagents` and `list_sub_agents` show only active children owned by the current stable Pi session, including starting/idle/busy state and attach commands. On normal session shutdown the extension stops that parent's children. `/reload` preserves them and rebinds ownership after registration. There is intentionally no parent watcher; `paj gc` handles crash recovery.
 
