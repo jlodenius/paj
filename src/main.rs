@@ -600,6 +600,19 @@ mod tests {
     }
 
     #[test]
+    fn accepted_action_request_uses_camel_case_action_id() {
+        let action_id = uuid::Uuid::now_v7();
+        let encoded = format!(r#"{{"kind":"acceptAction","actionId":"{action_id}"}}"#,);
+        let request = read_request(None, true, Cursor::new(encoded))
+            .expect("accepted action request should parse");
+
+        assert!(matches!(
+            request,
+            EditorRequest::AcceptAction { action_id: parsed } if parsed == action_id
+        ));
+    }
+
+    #[test]
     fn clap_rejects_multiple_request_sources() {
         let result = Cli::try_parse_from([
             "paj",
