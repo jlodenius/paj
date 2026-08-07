@@ -15,6 +15,13 @@ test("proposal guidance covers bridge response constraints", () => {
     ),
   );
   assert.ok(
+    PROPOSAL_PROMPT_GUIDELINES.some(
+      (line) =>
+        line.includes("recommends, suggests, or shows") &&
+        line.includes("concrete repository change"),
+    ),
+  );
+  assert.ok(
     PROPOSAL_PROMPT_GUIDELINES.some((line) => line.includes("final action")),
   );
   assert.ok(

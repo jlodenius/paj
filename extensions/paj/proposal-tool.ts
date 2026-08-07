@@ -38,7 +38,7 @@ export function registerProposalTool(
     description:
       "Attach structured actions for concrete changes recommended but not implemented in the current bridge response.",
     promptSnippet:
-      "Attach all unimplemented change recommendations to the bridge response",
+      "Attach every concrete unimplemented repository change to the bridge response",
     promptGuidelines: PROPOSAL_PROMPT_GUIDELINES,
     parameters: proposalParameters,
     async execute(_toolCallId, params) {
