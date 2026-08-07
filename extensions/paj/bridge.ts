@@ -2,16 +2,26 @@ import { randomUUID } from "node:crypto";
 import { chmod, lstat, unlink } from "node:fs/promises";
 import { createServer, type Server, type Socket } from "node:net";
 
-const PROTOCOL_VERSION = 1;
 const MAX_REQUEST_BYTES = 1024 * 1024;
 
+export interface EditorSource {
+  path: string;
+  startLine: number;
+  endLine: number;
+  content: string;
+}
+
+export type EditorRequest =
+  | { kind: "query"; query: string; source: EditorSource }
+  | { kind: "explain"; focus?: string; source: EditorSource }
+  | { kind: "review"; focus?: string; source: EditorSource }
+  | { kind: "followup"; question: string }
+  | { kind: "acceptAction"; actionId: string };
+
 interface BridgeRequest {
-  version: number;
   id: string;
-  method: "prompt";
-  params: {
-    text: string;
-  };
+  method: "request";
+  params: EditorRequest;
 }
 
 interface AssistantMessage {
@@ -35,6 +45,7 @@ export interface ProposalInput {
 interface ActiveRequest {
   id: string;
   socket: Socket;
+  request: EditorRequest;
   completedMessages: string[];
   proposals?: ProposalAction[];
   lastError?: string;
@@ -42,14 +53,15 @@ interface ActiveRequest {
 
 export interface BridgeActions {
   isIdle(): boolean;
-  sendPrompt(text: string): void;
-  cancelPrompt(): void;
-  setProposalToolActive?(active: boolean): void;
+  sendRequest(request: EditorRequest, acceptedAction?: ProposalAction): void;
+  cancelRequest(): void;
+  setRequestToolsActive?(request: EditorRequest | undefined): void;
 }
 
 export class BridgeServer {
   private server: Server | undefined;
   private readonly sockets = new Set<Socket>();
+  private readonly proposals = new Map<string, ProposalAction>();
   private active: ActiveRequest | undefined;
   private socketPath: string | undefined;
   private readonly actions: BridgeActions;
@@ -86,6 +98,10 @@ export class BridgeServer {
     }
     this.server = server;
     this.socketPath = socketPath;
+  }
+
+  getActiveRequest(): EditorRequest | undefined {
+    return this.active?.request;
   }
 
   onMessageUpdate(event: {
@@ -135,9 +151,11 @@ export class BridgeServer {
       let id: string;
       do {
         id = randomUUID();
-      } while (ids.has(id));
+      } while (ids.has(id) || this.proposals.has(id));
       ids.add(id);
-      return { id, ...proposal };
+      const action = { id, ...proposal };
+      this.proposals.set(id, action);
+      return action;
     });
     return active.proposals;
   }
@@ -224,7 +242,7 @@ export class BridgeServer {
       this.sockets.delete(socket);
       if (this.active?.socket === socket) {
         this.finishRequest();
-        this.actions.cancelPrompt();
+        this.actions.cancelRequest();
       }
     });
     socket.on("error", () => undefined);
@@ -252,17 +270,35 @@ export class BridgeServer {
       this.fail(socket, request.id, "busy", "Pi session is busy");
       return;
     }
+    let acceptedAction: ProposalAction | undefined;
+    if (request.params.kind === "acceptAction") {
+      acceptedAction = this.proposals.get(request.params.actionId);
+      if (!acceptedAction) {
+        this.fail(
+          socket,
+          request.id,
+          "unknown_action",
+          "proposed action was not found or was already accepted",
+        );
+        return;
+      }
+      this.proposals.delete(request.params.actionId);
+    }
     this.active = {
       id: request.id,
       socket,
+      request: request.params,
       completedMessages: [],
     };
     try {
-      this.actions.setProposalToolActive?.(true);
+      this.actions.setRequestToolsActive?.(request.params);
       this.write(socket, { event: "accepted" });
-      this.actions.sendPrompt(request.params.text);
+      this.actions.sendRequest(request.params, acceptedAction);
     } catch (error) {
-      this.fail(socket, request.id, "prompt_failed", String(error));
+      if (acceptedAction) {
+        this.proposals.set(acceptedAction.id, acceptedAction);
+      }
+      this.fail(socket, request.id, "request_failed", String(error));
       this.finishRequest();
     }
   }
@@ -272,7 +308,7 @@ export class BridgeServer {
       return;
     }
     this.active = undefined;
-    this.actions.setProposalToolActive?.(false);
+    this.actions.setRequestToolsActive?.(undefined);
   }
 
   private fail(
@@ -290,9 +326,7 @@ export class BridgeServer {
     event: Record<string, unknown> & { event: string },
   ): void {
     const id = event.id ?? this.active?.id;
-    socket.write(
-      `${JSON.stringify({ version: PROTOCOL_VERSION, id, ...event })}\n`,
-    );
+    socket.write(`${JSON.stringify({ id, ...event })}\n`);
   }
 }
 
@@ -319,39 +353,116 @@ function validateRequest(value: unknown): RequestValidation {
     return { ok: false, error: "request must be a JSON object" };
   }
   const id = typeof value.id === "string" ? value.id : undefined;
-  if (value.version !== PROTOCOL_VERSION) {
-    return {
-      ok: false,
-      id,
-      error: `unsupported bridge protocol version ${String(value.version)}`,
-    };
-  }
   if (!id || !isUuid(id)) {
     return { ok: false, error: "request id must be a UUID" };
   }
-  if (value.method !== "prompt") {
+  if (value.method !== "request") {
     return {
       ok: false,
       id,
       error: `unsupported bridge method ${String(value.method)}`,
     };
   }
-  if (
-    !isRecord(value.params) ||
-    typeof value.params.text !== "string" ||
-    value.params.text.trim().length === 0
-  ) {
-    return { ok: false, id, error: "prompt text is required" };
+  const params = validateEditorRequest(value.params);
+  if (!params.ok) {
+    return { ok: false, id, error: params.error };
   }
   return {
     ok: true,
-    request: {
-      version: PROTOCOL_VERSION,
-      id,
-      method: "prompt",
-      params: { text: value.params.text },
-    },
+    request: { id, method: "request", params: params.request },
   };
+}
+
+type EditorRequestValidation =
+  | { ok: true; request: EditorRequest }
+  | { ok: false; error: string };
+
+function validateEditorRequest(value: unknown): EditorRequestValidation {
+  if (!isRecord(value) || typeof value.kind !== "string") {
+    return { ok: false, error: "editor request kind is required" };
+  }
+  if (value.kind === "query") {
+    const source = validateSource(value.source);
+    if (
+      !source ||
+      !hasOnlyKeys(value, ["kind", "query", "source"]) ||
+      !isNonEmptyString(value.query)
+    ) {
+      return { ok: false, error: "query request is invalid" };
+    }
+    return { ok: true, request: { kind: "query", query: value.query, source } };
+  }
+  if (value.kind === "explain" || value.kind === "review") {
+    const source = validateSource(value.source);
+    if (
+      !source ||
+      !hasOnlyKeys(value, ["kind", "focus", "source"]) ||
+      (value.focus !== undefined && typeof value.focus !== "string")
+    ) {
+      return { ok: false, error: `${value.kind} request is invalid` };
+    }
+    return {
+      ok: true,
+      request: {
+        kind: value.kind,
+        source,
+        ...(value.focus === undefined ? {} : { focus: value.focus }),
+      },
+    };
+  }
+  if (value.kind === "followup") {
+    if (
+      !hasOnlyKeys(value, ["kind", "question"]) ||
+      !isNonEmptyString(value.question)
+    ) {
+      return { ok: false, error: "followup request is invalid" };
+    }
+    return { ok: true, request: { kind: "followup", question: value.question } };
+  }
+  if (value.kind === "acceptAction") {
+    if (
+      !hasOnlyKeys(value, ["kind", "actionId"]) ||
+      typeof value.actionId !== "string" ||
+      !isUuid(value.actionId)
+    ) {
+      return { ok: false, error: "acceptAction request is invalid" };
+    }
+    return {
+      ok: true,
+      request: { kind: "acceptAction", actionId: value.actionId },
+    };
+  }
+  return { ok: false, error: `unsupported editor request kind ${value.kind}` };
+}
+
+function validateSource(value: unknown): EditorSource | undefined {
+  if (
+    !isRecord(value) ||
+    !hasOnlyKeys(value, ["path", "startLine", "endLine", "content"]) ||
+    !isNonEmptyString(value.path) ||
+    !Number.isInteger(value.startLine) ||
+    !Number.isInteger(value.endLine) ||
+    (value.startLine as number) < 1 ||
+    (value.endLine as number) < (value.startLine as number) ||
+    typeof value.content !== "string"
+  ) {
+    return undefined;
+  }
+  return {
+    path: value.path,
+    startLine: value.startLine as number,
+    endLine: value.endLine as number,
+    content: value.content,
+  };
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, keys: string[]): boolean {
+  const allowed = new Set(keys);
+  return Object.keys(value).every((key) => allowed.has(key));
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
 }
 
 function validateProposals(value: unknown): ProposalInput[] {

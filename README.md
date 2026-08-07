@@ -99,14 +99,16 @@ Resolution first checks an absolute directory, each search root itself by exact 
 
 ## Editor and external-client bridge
 
-Each live Pi session exposes a private Unix socket for structured prompts from Neovim and other local clients:
+Each live Pi session exposes a private Unix socket for structured editor requests from Neovim and other local clients:
 
 ```sh
 paj bridge status agent-38ad3abf
-paj bridge prompt agent-38ad3abf --prompt "Explain this module"
-paj --json bridge prompt agent-38ad3abf --prompt-file request.md
-printf '%s' "Review this change" | paj bridge prompt agent-38ad3abf --prompt-stdin
+printf '%s' '{"kind":"followup","question":"Explain further"}' \
+  | paj bridge request agent-38ad3abf --request-stdin
+paj --json bridge request agent-38ad3abf --request-file request.json
 ```
+
+Source requests carry `path`, `startLine`, `endLine`, and `content` as structured data. The Pi extension exposes that source to the agent through the read-only `paj_editor_context` tool rather than embedding it in a user prompt. Supported request kinds are `query`, `explain`, `review`, `followup`, and `acceptAction`.
 
 Bridge requests emit `accepted`, `delta`, and `complete` JSON events. Only one request can run per Pi session; requests are rejected with a `busy` error while Pi is working. If a bridge client disconnects after acceptance, the extension cancels the Pi turn that it started. Socket paths are advertised by the session registry and removed during clean shutdown or stale-session garbage collection.
 

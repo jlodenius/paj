@@ -50,12 +50,18 @@ function collect(socket: Socket): Promise<Record<string, unknown>[]> {
   });
 }
 
+const source = {
+  path: "/tmp/example.ts",
+  startLine: 1,
+  endLine: 1,
+  content: "const answer = 42;",
+};
+
 function request(overrides: Record<string, unknown> = {}) {
   return JSON.stringify({
-    version: 1,
     id: REQUEST_ID,
-    method: "prompt",
-    params: { text: "hello" },
+    method: "request",
+    params: { kind: "query", query: "hello", source },
     ...overrides,
   });
 }
@@ -63,8 +69,8 @@ function request(overrides: Record<string, unknown> = {}) {
 function actions(overrides: Partial<BridgeActions> = {}) {
   return {
     isIdle: () => true,
-    sendPrompt: () => undefined,
-    cancelPrompt: () => undefined,
+    sendRequest: () => undefined,
+    cancelRequest: () => undefined,
     ...overrides,
   };
 }
@@ -74,8 +80,8 @@ test("streams a correlated response without cancelling completed work", async ()
   let cancellations = 0;
   await withServer(
     actions({
-      sendPrompt: (text) => prompts.push(text),
-      cancelPrompt: () => cancellations++,
+      sendRequest: (request) => prompts.push(request.kind === "query" ? request.query : request.kind),
+      cancelRequest: () => cancellations++,
     }),
     async (socketPath, server) => {
       const socket = await open(socketPath);
@@ -213,11 +219,46 @@ test("rejects repeated proposal calls", async () => {
   });
 });
 
+test("accepts a stored proposal exactly once without trusting client action text", async () => {
+  const dispatched: Array<{ kind: string; title?: string }> = [];
+  await withServer(
+    actions({
+      sendRequest: (request, action) => dispatched.push({ kind: request.kind, title: action?.title }),
+    }),
+    async (socketPath, server) => {
+      const querySocket = await open(socketPath);
+      const queryEvents = collect(querySocket);
+      querySocket.write(request() + "\n");
+      await new Promise<void>((resolve) => querySocket.once("data", () => resolve()));
+      const [proposal] = server.submitProposals([{ title: "Stored", description: "Trusted lookup" }]);
+      server.onAgentSettled();
+      await queryEvents;
+
+      const acceptedSocket = await open(socketPath);
+      const acceptedEvents = collect(acceptedSocket);
+      acceptedSocket.write(request({ params: { kind: "acceptAction", actionId: proposal.id } }) + "\n");
+      await new Promise<void>((resolve) => acceptedSocket.once("data", () => resolve()));
+      server.onAgentSettled();
+      await acceptedEvents;
+
+      const replaySocket = await open(socketPath);
+      const replayEvents = collect(replaySocket);
+      replaySocket.end(request({ params: { kind: "acceptAction", actionId: proposal.id } }) + "\n");
+      const [replay] = await replayEvents;
+      assert.equal(replay.code, "unknown_action");
+    },
+  );
+  assert.deepEqual(dispatched, [
+    { kind: "query", title: undefined },
+    { kind: "acceptAction", title: "Stored" },
+  ]);
+});
+
 test("activates and cleans up the proposal tool across lifecycle outcomes", async (t) => {
   await t.test("settled", async () => {
     const states: boolean[] = [];
     await withServer(
-      actions({ setProposalToolActive: (active) => states.push(active) }),
+      actions({ setRequestToolsActive: (request) => states.push(request !== undefined) }),
       async (socketPath, server) => {
         const socket = await open(socketPath);
         const eventsPromise = collect(socket);
@@ -230,12 +271,12 @@ test("activates and cleans up the proposal tool across lifecycle outcomes", asyn
     assert.deepEqual(states, [true, false]);
   });
 
-  await t.test("prompt failure", async () => {
+  await t.test("request failure", async () => {
     const states: boolean[] = [];
     await withServer(
       actions({
-        setProposalToolActive: (active) => states.push(active),
-        sendPrompt: () => {
+        setRequestToolsActive: (request) => states.push(request !== undefined),
+        sendRequest: () => {
           throw new Error("failed");
         },
       }),
@@ -255,8 +296,8 @@ test("cancels exactly once when an accepted client disconnects", async () => {
   const states: boolean[] = [];
   await withServer(
     actions({
-      cancelPrompt: () => cancellations++,
-      setProposalToolActive: (active) => states.push(active),
+      cancelRequest: () => cancellations++,
+      setRequestToolsActive: (request) => states.push(request !== undefined),
     }),
     async (socketPath) => {
       const socket = await open(socketPath);
@@ -287,7 +328,7 @@ test("rejects null, arrays, malformed JSON, and malformed IDs without dispatch",
     await t.test(name, async () => {
       let dispatched = false;
       await withServer(
-        actions({ sendPrompt: () => (dispatched = true) }),
+        actions({ sendRequest: () => (dispatched = true) }),
         async (socketPath) => {
           const socket = await open(socketPath);
           const eventsPromise = collect(socket);
@@ -300,12 +341,12 @@ test("rejects null, arrays, malformed JSON, and malformed IDs without dispatch",
   }
 });
 
-test("returns correlated errors for version, method, and empty prompt mismatches", async (t) => {
+test("returns correlated errors for malformed editor requests", async (t) => {
   for (const [name, line, message] of [
-    ["version", request({ version: 2 }), "unsupported bridge protocol version 2"],
     ["method", request({ method: "cancel" }), "unsupported bridge method cancel"],
-    ["empty prompt", request({ params: { text: "  " } }), "prompt text is required"],
-    ["array params", request({ params: [] }), "prompt text is required"],
+    ["empty query", request({ params: { kind: "query", query: "  ", source } }), "query request is invalid"],
+    ["array params", request({ params: [] }), "editor request kind is required"],
+    ["unknown kind", request({ params: { kind: "prompt" } }), "unsupported editor request kind prompt"],
   ]) {
     await t.test(name, async () => {
       await withServer(actions(), async (socketPath) => {
@@ -325,7 +366,7 @@ test("returns correlated errors for version, method, and empty prompt mismatches
 test("rejects oversized requests before dispatch", async () => {
   let dispatched = false;
   await withServer(
-    actions({ sendPrompt: () => (dispatched = true) }),
+    actions({ sendRequest: () => (dispatched = true) }),
     async (socketPath) => {
       const socket = await open(socketPath);
       const eventsPromise = collect(socket);
@@ -341,7 +382,7 @@ test("rejects requests while Pi is busy without cancelling", async () => {
   await withServer(
     actions({
       isIdle: () => false,
-      cancelPrompt: () => cancellations++,
+      cancelRequest: () => cancellations++,
     }),
     async (socketPath) => {
       const socket = await open(socketPath);
@@ -358,7 +399,7 @@ test("rejects requests while Pi is busy without cancelling", async () => {
 test("a rejected secondary client does not cancel the active request", async () => {
   let cancellations = 0;
   await withServer(
-    actions({ cancelPrompt: () => cancellations++ }),
+    actions({ cancelRequest: () => cancellations++ }),
     async (socketPath, server) => {
       const active = await open(socketPath);
       const activeEvents = collect(active);
@@ -389,7 +430,7 @@ test("server shutdown does not cancel an active request", async () => {
   const directory = await mkdtemp(join(tmpdir(), "paj-bridge-test-"));
   const socketPath = join(directory, "bridge.sock");
   const server = new BridgeServer(
-    actions({ cancelPrompt: () => cancellations++ }),
+    actions({ cancelRequest: () => cancellations++ }),
   );
   await server.start(socketPath);
   const socket = await open(socketPath);

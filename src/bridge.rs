@@ -10,21 +10,45 @@ use uuid::Uuid;
 
 use crate::registry::Session;
 
-const PROTOCOL_VERSION: u8 = 1;
 const MAX_EVENT_BYTES: usize = 1024 * 1024;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BridgeRequest<'a> {
-    version: u8,
-    id: Uuid,
-    method: &'static str,
-    params: PromptParams<'a>,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EditorSource {
+    pub path: String,
+    pub start_line: usize,
+    pub end_line: usize,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum EditorRequest {
+    Query {
+        query: String,
+        source: EditorSource,
+    },
+    Explain {
+        source: EditorSource,
+        focus: Option<String>,
+    },
+    Review {
+        source: EditorSource,
+        focus: Option<String>,
+    },
+    Followup {
+        question: String,
+    },
+    AcceptAction {
+        action_id: Uuid,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct PromptParams<'a> {
-    text: &'a str,
+struct BridgeRequest<'a> {
+    id: Uuid,
+    method: &'static str,
+    params: &'a EditorRequest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,22 +63,18 @@ pub struct BridgeAction {
 #[serde(tag = "event", rename_all = "camelCase")]
 pub enum BridgeEvent {
     Accepted {
-        version: u8,
         id: Uuid,
     },
     Delta {
-        version: u8,
         id: Uuid,
         text: String,
     },
     Complete {
-        version: u8,
         id: Uuid,
         text: String,
         actions: Vec<BridgeAction>,
     },
     Error {
-        version: u8,
         id: Uuid,
         code: String,
         message: String,
@@ -66,15 +86,6 @@ impl BridgeEvent {
         match self {
             Self::Delta { text, .. } | Self::Complete { text, .. } => Some(text),
             Self::Accepted { .. } | Self::Error { .. } => None,
-        }
-    }
-
-    fn version(&self) -> u8 {
-        match self {
-            Self::Accepted { version, .. }
-            | Self::Delta { version, .. }
-            | Self::Complete { version, .. }
-            | Self::Error { version, .. } => *version,
         }
     }
 
@@ -98,15 +109,12 @@ impl BridgeClient {
         Self { timeout }
     }
 
-    pub fn prompt(
+    pub fn request(
         &self,
         session: &Session,
-        text: &str,
+        request: &EditorRequest,
         mut on_event: impl FnMut(&BridgeEvent),
     ) -> Result<(), BridgeError> {
-        if text.trim().is_empty() {
-            return Err(BridgeError::EmptyPrompt);
-        }
         let socket = session
             .bridge_socket
             .as_ref()
@@ -119,13 +127,12 @@ impl BridgeClient {
         stream.set_write_timeout(Some(self.timeout))?;
 
         let request_id = Uuid::now_v7();
-        let request = BridgeRequest {
-            version: PROTOCOL_VERSION,
+        let envelope = BridgeRequest {
             id: request_id,
-            method: "prompt",
-            params: PromptParams { text },
+            method: "request",
+            params: request,
         };
-        serde_json::to_writer(&mut stream, &request)?;
+        serde_json::to_writer(&mut stream, &envelope)?;
         stream.write_all(b"\n")?;
         stream.flush()?;
 
@@ -150,9 +157,6 @@ impl BridgeClient {
                 return Err(BridgeError::EventTooLarge);
             }
             let event: BridgeEvent = serde_json::from_str(&line)?;
-            if event.version() != PROTOCOL_VERSION {
-                return Err(BridgeError::ProtocolVersion(event.version()));
-            }
             if event.id() != request_id {
                 return Err(BridgeError::RequestIdMismatch);
             }
@@ -179,8 +183,6 @@ impl BridgeClient {
 
 #[derive(Debug, Error)]
 pub enum BridgeError {
-    #[error("prompt cannot be empty")]
-    EmptyPrompt,
     #[error("session does not advertise a bridge socket; restart Pi after updating Paj")]
     UnsupportedSession,
     #[error("failed to connect to bridge socket {socket}")]
@@ -195,8 +197,6 @@ pub enum BridgeError {
     Disconnected,
     #[error("bridge event exceeded the maximum size")]
     EventTooLarge,
-    #[error("bridge returned unsupported protocol version {0}")]
-    ProtocolVersion(u8),
     #[error("bridge returned an event for a different request")]
     RequestIdMismatch,
     #[error("bridge returned output before accepting the request")]
@@ -224,7 +224,9 @@ mod tests {
 
     use tempfile::{TempDir, tempdir};
 
-    use super::{BridgeAction, BridgeClient, BridgeError, BridgeEvent};
+    use super::{
+        BridgeAction, BridgeClient, BridgeError, BridgeEvent, EditorRequest, EditorSource,
+    };
     use crate::project::Project;
     use crate::registry::{Registration, Registry, Session};
 
@@ -259,8 +261,20 @@ mod tests {
         (directory, session, listener)
     }
 
+    fn editor_request() -> EditorRequest {
+        EditorRequest::Query {
+            query: "hello".to_owned(),
+            source: EditorSource {
+                path: "/tmp/example.rs".to_owned(),
+                start_line: 1,
+                end_line: 1,
+                content: "fn main() {}".to_owned(),
+            },
+        }
+    }
+
     #[test]
-    fn prompt_streams_correlated_events_until_completion() {
+    fn request_streams_correlated_events_until_completion() {
         let (_directory, session, listener) = registered_bridge();
         let socket = session
             .bridge_socket
@@ -281,21 +295,25 @@ mod tests {
                 .expect("request should be read");
             let request: serde_json::Value =
                 serde_json::from_str(&request).expect("request should be JSON");
-            assert_eq!(request["params"]["text"], "hello");
+            assert_eq!(request["method"], "request");
+            assert_eq!(request["params"]["kind"], "query");
+            assert_eq!(request["params"]["query"], "hello");
             let id = request["id"].as_str().expect("request should have an ID");
             write!(
                 stream,
-                "{{\"event\":\"accepted\",\"version\":1,\"id\":\"{id}\"}}\n\
-                 {{\"event\":\"delta\",\"version\":1,\"id\":\"{id}\",\"text\":\"hel\"}}\n\
-                 {{\"event\":\"complete\",\"version\":1,\"id\":\"{id}\",\"text\":\"hello\",\"actions\":[{{\"id\":\"019fa92e-a7c2-7072-84a7-8933262464a5\",\"title\":\"Improve it\",\"description\":\"Implement the improvement\"}}]}}\n"
+                "{{\"event\":\"accepted\",\"id\":\"{id}\"}}\n\
+                 {{\"event\":\"delta\",\"id\":\"{id}\",\"text\":\"hel\"}}\n\
+                 {{\"event\":\"complete\",\"id\":\"{id}\",\"text\":\"hello\",\"actions\":[{{\"id\":\"019fa92e-a7c2-7072-84a7-8933262464a5\",\"title\":\"Improve it\",\"description\":\"Implement the improvement\"}}]}}\n"
             )
             .expect("events should be written");
         });
         let mut events = Vec::new();
 
         BridgeClient::new(std::time::Duration::from_secs(1))
-            .prompt(&session, "hello", |event| events.push(event.clone()))
-            .expect("prompt should complete");
+            .request(&session, &editor_request(), |event| {
+                events.push(event.clone())
+            })
+            .expect("request should complete");
         server.join().expect("server should stop");
 
         assert!(matches!(events.as_slice(), [
@@ -313,7 +331,6 @@ mod tests {
         let request_id = uuid::Uuid::now_v7();
         let action_id = uuid::Uuid::now_v7();
         let event = BridgeEvent::Complete {
-            version: 1,
             id: request_id,
             text: "response".to_owned(),
             actions: vec![BridgeAction {
@@ -327,7 +344,6 @@ mod tests {
             serde_json::to_value(event).expect("event should serialize"),
             serde_json::json!({
                 "event": "complete",
-                "version": 1,
                 "id": request_id,
                 "text": "response",
                 "actions": [{
@@ -342,20 +358,18 @@ mod tests {
     #[test]
     fn complete_event_requires_actions_but_accepts_an_empty_array() {
         let id = uuid::Uuid::now_v7();
-        let empty = format!(
-            "{{\"event\":\"complete\",\"version\":1,\"id\":\"{id}\",\"text\":\"done\",\"actions\":[]}}"
-        );
+        let empty =
+            format!("{{\"event\":\"complete\",\"id\":\"{id}\",\"text\":\"done\",\"actions\":[]}}");
         assert!(matches!(
             serde_json::from_str::<BridgeEvent>(&empty),
             Ok(BridgeEvent::Complete { actions, .. }) if actions.is_empty()
         ));
-        let missing =
-            format!("{{\"event\":\"complete\",\"version\":1,\"id\":\"{id}\",\"text\":\"done\"}}");
+        let missing = format!("{{\"event\":\"complete\",\"id\":\"{id}\",\"text\":\"done\"}}");
         assert!(serde_json::from_str::<BridgeEvent>(&missing).is_err());
     }
 
     #[test]
-    fn prompt_rejects_an_event_for_a_different_request() {
+    fn request_rejects_an_event_for_a_different_request() {
         let (_directory, session, listener) = registered_bridge();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("client should connect");
@@ -364,22 +378,22 @@ mod tests {
                 .read_line(&mut request)
                 .expect("request should be read");
             let other_id = uuid::Uuid::now_v7();
-            writeln!(
-                stream,
-                "{{\"event\":\"accepted\",\"version\":1,\"id\":\"{other_id}\"}}"
-            )
-            .expect("event should be written");
+            writeln!(stream, "{{\"event\":\"accepted\",\"id\":\"{other_id}\"}}")
+                .expect("event should be written");
         });
 
-        let result =
-            BridgeClient::new(std::time::Duration::from_secs(1)).prompt(&session, "hello", |_| {});
+        let result = BridgeClient::new(std::time::Duration::from_secs(1)).request(
+            &session,
+            &editor_request(),
+            |_| {},
+        );
         server.join().expect("server should stop");
 
         assert!(matches!(result, Err(BridgeError::RequestIdMismatch)));
     }
 
     #[test]
-    fn prompt_rejects_output_before_acceptance() {
+    fn request_rejects_output_before_acceptance() {
         let (_directory, session, listener) = registered_bridge();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("client should connect");
@@ -392,13 +406,16 @@ mod tests {
             let id = request["id"].as_str().expect("request should have an ID");
             writeln!(
                 stream,
-                "{{\"event\":\"delta\",\"version\":1,\"id\":\"{id}\",\"text\":\"early\"}}"
+                "{{\"event\":\"delta\",\"id\":\"{id}\",\"text\":\"early\"}}"
             )
             .expect("event should be written");
         });
 
-        let result =
-            BridgeClient::new(std::time::Duration::from_secs(1)).prompt(&session, "hello", |_| {});
+        let result = BridgeClient::new(std::time::Duration::from_secs(1)).request(
+            &session,
+            &editor_request(),
+            |_| {},
+        );
         server.join().expect("server should stop");
 
         assert!(matches!(result, Err(BridgeError::EventBeforeAcceptance)));

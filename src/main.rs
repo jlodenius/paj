@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use paj::bridge::{BridgeClient, BridgeEvent, bridge_is_available};
+use paj::bridge::{BridgeClient, BridgeEvent, EditorRequest, bridge_is_available};
 use paj::project::Project;
 use paj::registry::{Message, Registration, Registry, Session};
 use paj::subagent::{SpawnRecord, SpawnStore};
@@ -164,15 +164,13 @@ enum MessageCommands {
 enum BridgeCommands {
     /// Check whether a session advertises a reachable bridge socket.
     Status { session: String },
-    /// Send a prompt and stream bridge events until completion.
-    Prompt {
+    /// Send a structured editor request and stream bridge events until completion.
+    Request {
         session: String,
-        #[arg(long, conflicts_with_all = ["prompt_file", "prompt_stdin"])]
-        prompt: Option<String>,
-        #[arg(long, conflicts_with_all = ["prompt", "prompt_stdin"])]
-        prompt_file: Option<PathBuf>,
-        #[arg(long, conflicts_with_all = ["prompt", "prompt_file"])]
-        prompt_stdin: bool,
+        #[arg(long, conflicts_with = "request_stdin")]
+        request_file: Option<PathBuf>,
+        #[arg(long, conflicts_with = "request_file")]
+        request_stdin: bool,
         #[arg(long, default_value_t = 300)]
         timeout: u64,
     },
@@ -428,18 +426,17 @@ fn run_bridge_command(registry: &Registry, command: BridgeCommands, json: bool) 
                 Ok(())
             }
         }
-        BridgeCommands::Prompt {
+        BridgeCommands::Request {
             session,
-            prompt,
-            prompt_file,
-            prompt_stdin,
+            request_file,
+            request_stdin,
             timeout,
         } => {
             let session = registry.resolve_live_session(&session)?;
-            let prompt = read_prompt(prompt, prompt_file, prompt_stdin, io::stdin().lock())?;
+            let request = read_request(request_file, request_stdin, io::stdin().lock())?;
             let client = BridgeClient::new(Duration::from_secs(timeout));
             let mut received_delta = false;
-            client.prompt(&session, &prompt, |event| {
+            client.request(&session, &request, |event| {
                 if json {
                     println!(
                         "{}",
@@ -468,25 +465,26 @@ fn run_bridge_command(registry: &Registry, command: BridgeCommands, json: bool) 
     }
 }
 
-fn read_prompt(
-    prompt: Option<String>,
-    prompt_file: Option<PathBuf>,
-    prompt_stdin: bool,
+fn read_request(
+    request_file: Option<PathBuf>,
+    request_stdin: bool,
     mut stdin: impl Read,
-) -> Result<String> {
-    match (prompt, prompt_file, prompt_stdin) {
-        (Some(prompt), None, false) => Ok(prompt),
-        (None, Some(path), false) => Ok(std::fs::read_to_string(path)?),
-        (None, None, true) => {
-            let mut prompt = String::new();
-            stdin.read_to_string(&mut prompt)?;
-            Ok(prompt)
+) -> Result<EditorRequest> {
+    let encoded = match (request_file, request_stdin) {
+        (Some(path), false) => std::fs::read_to_string(path)?,
+        (None, true) => {
+            let mut encoded = String::new();
+            stdin.read_to_string(&mut encoded)?;
+            encoded
         }
-        (None, None, false) => Err(anyhow::anyhow!(
-            "--prompt, --prompt-file, or --prompt-stdin is required"
-        )),
-        _ => unreachable!("clap prevents conflicting prompt sources"),
-    }
+        (None, false) => {
+            return Err(anyhow::anyhow!(
+                "--request-file or --request-stdin is required"
+            ));
+        }
+        _ => unreachable!("clap prevents conflicting request sources"),
+    };
+    Ok(serde_json::from_str(&encoded)?)
 }
 
 fn git_branch(root: &Path) -> Option<String> {
@@ -582,26 +580,35 @@ mod tests {
 
     use clap::Parser;
 
-    use super::{Cli, read_prompt};
+    use paj::bridge::EditorRequest;
+
+    use super::{Cli, read_request};
 
     #[test]
-    fn prompt_can_be_read_from_stdin() {
-        let prompt = read_prompt(None, None, true, Cursor::new("from stdin"))
-            .expect("stdin prompt should be read");
+    fn request_can_be_read_from_stdin() {
+        let request = read_request(
+            None,
+            true,
+            Cursor::new(r#"{"kind":"followup","question":"Why?"}"#),
+        )
+        .expect("stdin request should be read");
 
-        assert_eq!(prompt, "from stdin");
+        assert!(matches!(
+            request,
+            EditorRequest::Followup { question } if question == "Why?"
+        ));
     }
 
     #[test]
-    fn clap_rejects_multiple_prompt_sources() {
+    fn clap_rejects_multiple_request_sources() {
         let result = Cli::try_parse_from([
             "paj",
             "bridge",
-            "prompt",
+            "request",
             "primary",
-            "--prompt",
-            "one",
-            "--prompt-stdin",
+            "--request-file",
+            "request.json",
+            "--request-stdin",
         ]);
 
         assert!(result.is_err());

@@ -5,7 +5,16 @@ import type {
 import { Type } from "typebox";
 
 import { renamePajSession } from "./agent-name.ts";
-import { BridgeServer } from "./bridge.ts";
+import {
+  BridgeServer,
+  type EditorRequest,
+  type ProposalAction,
+} from "./bridge.ts";
+import {
+  isToolAllowed,
+  requestPolicy,
+  requestPrompt,
+} from "./editor-request.ts";
 import { deliverPendingMessages } from "./message-delivery.ts";
 import { registerProposalTool } from "./proposal-tool.ts";
 import {
@@ -71,6 +80,51 @@ export default function pajExtension(pi: ExtensionAPI) {
     }
     return bridge.submitProposals(actions);
   });
+
+  const setToolActive = (name: string, active: boolean) => {
+    const current = pi.getActiveTools();
+    if (active && !current.includes(name)) {
+      pi.setActiveTools([...current, name]);
+    } else if (!active && current.includes(name)) {
+      pi.setActiveTools(current.filter((candidate) => candidate !== name));
+    }
+  };
+
+  pi.registerTool({
+    name: "paj_editor_context",
+    label: "Paj editor context",
+    description:
+      "Return the structured source selection for the active Paj editor request",
+    parameters: Type.Object({}),
+    async execute() {
+      const request = bridge?.getActiveRequest();
+      if (!request || !("source" in request)) {
+        throw new Error("paj_editor_context requires an active source request");
+      }
+      return {
+        content: [{ type: "text", text: JSON.stringify(request.source) }],
+        details: { source: request.source },
+      };
+    },
+  });
+  setProposalToolActive(false);
+  setToolActive("paj_editor_context", false);
+
+  const setRequestToolsActive = (request: EditorRequest | undefined) => {
+    const readOnly = request !== undefined && request.kind !== "acceptAction";
+    setProposalToolActive(readOnly);
+    setToolActive(
+      "paj_editor_context",
+      request !== undefined && "source" in request,
+    );
+  };
+
+  const sendEditorRequest = (
+    request: EditorRequest,
+    acceptedAction?: ProposalAction,
+  ) => {
+    pi.sendUserMessage(requestPrompt(request, acceptedAction));
+  };
 
   const execPaj = async (args: string[], cwd: string) => {
     const result = await pi.exec("paj", args, {
@@ -183,7 +237,7 @@ export default function pajExtension(pi: ExtensionAPI) {
           console.error("paj bridge shutdown failed", error),
         );
     }
-    setProposalToolActive(false);
+    setRequestToolsActive(undefined);
     if (previousSessionId) {
       await execPaj(
         ["session", "unregister", previousSessionId],
@@ -234,9 +288,9 @@ export default function pajExtension(pi: ExtensionAPI) {
     }
     const nextBridge = new BridgeServer({
       isIdle: () => ctx.isIdle(),
-      sendPrompt: (text) => pi.sendUserMessage(text),
-      cancelPrompt: () => ctx.abort(),
-      setProposalToolActive,
+      sendRequest: sendEditorRequest,
+      cancelRequest: () => ctx.abort(),
+      setRequestToolsActive,
     });
     try {
       await nextBridge.start(session.bridgeSocket);
@@ -492,6 +546,27 @@ export default function pajExtension(pi: ExtensionAPI) {
         ctx.ui.notify(`Failed to rename Paj agent: ${String(error)}`, "error");
       }
     }
+  });
+
+  pi.on("before_agent_start", (event) => {
+    const request = bridge?.getActiveRequest();
+    if (!request) {
+      return;
+    }
+    return {
+      systemPrompt: `${event.systemPrompt}\n\n${requestPolicy(request)}`,
+    };
+  });
+
+  pi.on("tool_call", (event) => {
+    const request = bridge?.getActiveRequest();
+    if (!request || isToolAllowed(request, event.toolName)) {
+      return;
+    }
+    return {
+      block: true,
+      reason: `${event.toolName} is unavailable during a read-only Paj request`,
+    };
   });
 
   pi.on("agent_start", async (_event, ctx) => {

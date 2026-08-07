@@ -55,9 +55,8 @@ Use `--json` for structured output. Run `paj <command> --help` for complete opti
 | `paj message pending <session>` | List messages awaiting delivery |
 | `paj message ack <session> <message>` | Acknowledge a delivered message |
 | `paj bridge status <session>` | Check whether a session's external bridge is available |
-| `paj bridge prompt <session> --prompt <text>` | Send an external prompt |
-| `paj bridge prompt <session> --prompt-file <path>` | Send an external prompt from a file |
-| `paj bridge prompt <session> --prompt-stdin` | Read an external prompt from standard input |
+| `paj bridge request <session> --request-file <path>` | Send a structured editor request from a file |
+| `paj bridge request <session> --request-stdin` | Read a structured editor request from standard input |
 | `paj project resolve <reference>` | Resolve an exact project or fail with candidates |
 | `paj subagent list --parent-pi-session-id <id>` | List a stable parent's active spawn records |
 | `paj gc --stale-after <seconds>` | Remove stale registrations and orphaned owned tmux sessions/records |

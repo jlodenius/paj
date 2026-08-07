@@ -168,7 +168,7 @@ fn list_outputs_empty_json_array_when_project_has_no_sessions() {
 }
 
 #[test]
-fn bridge_prompt_reads_prompt_from_stdin() {
+fn bridge_request_reads_structured_request_from_stdin() {
     let runtime = tempdir().expect("runtime directory should be created");
     let project = tempdir().expect("project directory should be created");
     let registry = Registry::new(runtime.path().to_path_buf()).expect("registry should be created");
@@ -203,12 +203,13 @@ fn bridge_prompt_reads_prompt_from_stdin() {
             .expect("request should be read");
         let request: serde_json::Value =
             serde_json::from_str(&request).expect("request should be JSON");
-        assert_eq!(request["params"]["text"], "prompt from stdin");
+        assert_eq!(request["params"]["kind"], "followup");
+        assert_eq!(request["params"]["question"], "from stdin");
         let id = request["id"].as_str().expect("request should have an ID");
         write!(
             stream,
-            "{{\"event\":\"accepted\",\"version\":1,\"id\":\"{id}\"}}\n\
-             {{\"event\":\"complete\",\"version\":1,\"id\":\"{id}\",\"text\":\"done\",\"actions\":[]}}\n"
+            "{{\"event\":\"accepted\",\"id\":\"{id}\"}}\n\
+             {{\"event\":\"complete\",\"id\":\"{id}\",\"text\":\"done\",\"actions\":[]}}\n"
         )
         .expect("events should be written");
     });
@@ -217,9 +218,9 @@ fn bridge_prompt_reads_prompt_from_stdin() {
         .env("PAJ_RUNTIME_DIR", runtime.path())
         .args([
             "bridge",
-            "prompt",
+            "request",
             &session.id.to_string(),
-            "--prompt-stdin",
+            "--request-stdin",
             "--timeout",
             "1",
         ])
@@ -231,8 +232,8 @@ fn bridge_prompt_reads_prompt_from_stdin() {
         .stdin
         .take()
         .expect("stdin should be piped")
-        .write_all(b"prompt from stdin")
-        .expect("prompt should be written");
+        .write_all(br#"{"kind":"followup","question":"from stdin"}"#)
+        .expect("request should be written");
 
     let output = child.wait_with_output().expect("paj should finish");
     server.join().expect("server should finish");
@@ -242,7 +243,7 @@ fn bridge_prompt_reads_prompt_from_stdin() {
 }
 
 #[test]
-fn bridge_prompt_json_preserves_complete_actions() {
+fn bridge_request_json_preserves_complete_actions() {
     let runtime = tempdir().expect("runtime directory should be created");
     let project = tempdir().expect("project directory should be created");
     let registry = Registry::new(runtime.path().to_path_buf()).expect("registry should be created");
@@ -281,22 +282,25 @@ fn bridge_prompt_json_preserves_complete_actions() {
         let id = request["id"].as_str().expect("request should have an ID");
         write!(
             stream,
-            "{{\"event\":\"accepted\",\"version\":1,\"id\":\"{id}\"}}\n\
-             {{\"event\":\"complete\",\"version\":1,\"id\":\"{id}\",\"text\":\"done\",\"actions\":[{{\"id\":\"{action_id}\",\"title\":\"Change\",\"description\":\"Make the change\"}}]}}\n"
+            "{{\"event\":\"accepted\",\"id\":\"{id}\"}}\n\
+             {{\"event\":\"complete\",\"id\":\"{id}\",\"text\":\"done\",\"actions\":[{{\"id\":\"{action_id}\",\"title\":\"Change\",\"description\":\"Make the change\"}}]}}\n"
         )
         .expect("events should be written");
     });
 
+    let request_path = project.path().join("request.json");
+    std::fs::write(&request_path, r#"{"kind":"followup","question":"hello"}"#)
+        .expect("request file should be written");
     let output = paj()
         .current_dir(project.path())
         .env("PAJ_RUNTIME_DIR", runtime.path())
         .args([
             "--json",
             "bridge",
-            "prompt",
+            "request",
             &session.id.to_string(),
-            "--prompt",
-            "hello",
+            "--request-file",
+            request_path.to_str().expect("request path should be UTF-8"),
             "--timeout",
             "1",
         ])
