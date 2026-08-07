@@ -107,8 +107,6 @@ export default function pajExtension(pi: ExtensionAPI) {
       };
     },
   });
-  setProposalToolActive(false);
-  setToolActive("paj_editor_context", false);
 
   const setRequestToolsActive = (request: EditorRequest | undefined) => {
     const readOnly = request !== undefined && request.kind !== "acceptAction";
@@ -484,6 +482,7 @@ export default function pajExtension(pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => {
     shuttingDown = false;
+    setRequestToolsActive(undefined);
     process.env.PAJ_PI_SESSION_ID = ctx.sessionManager.getSessionId();
     process.env.PAJ_PI_SESSION_PID = String(process.pid);
     heartbeatTimer = setInterval(() => {
