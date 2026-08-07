@@ -581,7 +581,22 @@ export default function pajExtension(pi: ExtensionAPI) {
   });
 
   pi.on("agent_settled", async (_event, ctx) => {
-    bridge?.onAgentSettled();
+    const result = bridge?.onAgentSettled();
+    if (result === "needsFinalization") {
+      pi.sendMessage(
+        {
+          customType: "paj-finalize-response",
+          content: [
+            "Finalize the preceding visible Paj response now.",
+            "Call paj_propose_changes exactly once with every concrete unimplemented repository change it recommends, or an empty array when there are none.",
+            "Do not add visible text or call any other tool.",
+          ].join(" "),
+          display: false,
+        },
+        { deliverAs: "followUp", triggerTurn: true },
+      );
+      return;
+    }
     await queueStatusUpdate(ctx, "idle").catch(() => undefined);
   });
 

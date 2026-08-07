@@ -22,7 +22,7 @@ const proposalParameters = Type.Object({
     ),
     {
       description: "All proposed changes for this bridge response",
-      minItems: 1,
+      minItems: 0,
       maxItems: 20,
     },
   ),

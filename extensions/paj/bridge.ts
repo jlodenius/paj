@@ -47,6 +47,7 @@ interface ActiveRequest {
   socket: Socket;
   request: EditorRequest;
   completedMessages: string[];
+  finalizationAttempts: number;
   proposals?: ProposalAction[];
   lastError?: string;
 }
@@ -160,10 +161,10 @@ export class BridgeServer {
     return active.proposals;
   }
 
-  onAgentSettled(): void {
+  onAgentSettled(): "inactive" | "needsFinalization" | "completed" {
     const active = this.active;
     if (!active) {
-      return;
+      return "inactive";
     }
     if (active.lastError) {
       this.fail(
@@ -171,6 +172,20 @@ export class BridgeServer {
         active.id,
         "generation_failed",
         active.lastError,
+      );
+    } else if (
+      active.request.kind !== "acceptAction" &&
+      active.proposals === undefined
+    ) {
+      if (active.finalizationAttempts === 0) {
+        active.finalizationAttempts++;
+        return "needsFinalization";
+      }
+      this.fail(
+        active.socket,
+        active.id,
+        "missing_finalization",
+        "agent did not submit structured Paj actions",
       );
     } else {
       this.write(active.socket, {
@@ -181,6 +196,7 @@ export class BridgeServer {
       active.socket.end();
     }
     this.finishRequest();
+    return "completed";
   }
 
   async stop(): Promise<void> {
@@ -289,6 +305,7 @@ export class BridgeServer {
       socket,
       request: request.params,
       completedMessages: [],
+      finalizationAttempts: 0,
     };
     try {
       this.actions.setRequestToolsActive?.(request.params);
@@ -468,9 +485,6 @@ function isNonEmptyString(value: unknown): value is string {
 function validateProposals(value: unknown): ProposalInput[] {
   if (!Array.isArray(value)) {
     throw new Error("paj_propose_changes actions must be an array");
-  }
-  if (value.length === 0) {
-    throw new Error("paj_propose_changes requires at least one action");
   }
   if (value.length > 20) {
     throw new Error("paj_propose_changes accepts at most 20 actions");

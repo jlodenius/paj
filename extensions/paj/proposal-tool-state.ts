@@ -3,11 +3,11 @@ import type { ProposalAction } from "./bridge.ts";
 export const PROPOSAL_TOOL_NAME = "paj_propose_changes";
 
 export const PROPOSAL_PROMPT_GUIDELINES = [
-  "In bridge turns, call paj_propose_changes whenever the visible response recommends, suggests, or shows an example of a concrete repository change that has not been implemented.",
+  "In every read-only bridge turn, call paj_propose_changes exactly once as the final action, after all visible Markdown and other tool use.",
+  "Pass every concrete unimplemented repository change in one paj_propose_changes array; pass an empty array when the response contains none.",
   "Treat proposed code, replacement wording, refactor examples, and cleaner or better alternatives as recommendations, not mere explanations.",
   "In bridge turns, visible Markdown must explicitly state every unimplemented recommendation that paj_propose_changes includes.",
-  "Call paj_propose_changes exactly once as the final action of a bridge turn, with every proposal in one array.",
-  "Do not use paj_propose_changes for mere risks or explanations, or for changes already implemented in the response.",
+  "Do not include mere risks, explanations, or already implemented changes in paj_propose_changes.",
   "Do not call paj_propose_changes alongside any other tool calls.",
 ];
 

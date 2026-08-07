@@ -75,6 +75,16 @@ function actions(overrides: Partial<BridgeActions> = {}) {
   };
 }
 
+function settle(server: BridgeServer) {
+  const first = server.onAgentSettled();
+  if (first === "needsFinalization") {
+    server.submitProposals([]);
+    assert.equal(server.onAgentSettled(), "completed");
+  } else {
+    assert.equal(first, "completed");
+  }
+}
+
 test("streams a correlated response without cancelling completed work", async () => {
   const prompts: string[] = [];
   let cancellations = 0;
@@ -97,7 +107,7 @@ test("streams a correlated response without cancelling completed work", async ()
           content: [{ type: "text", text: "hello" }],
         },
       });
-      server.onAgentSettled();
+      settle(server);
 
       const events = await eventsPromise;
       assert.deepEqual(
@@ -109,6 +119,30 @@ test("streams a correlated response without cancelling completed work", async ()
       assert.equal(cancellations, 0);
     },
   );
+});
+
+test("requires structured action finalization before completing a read-only request", async () => {
+  await withServer(actions(), async (socketPath, server) => {
+    const socket = await open(socketPath);
+    const eventsPromise = collect(socket);
+    socket.write(request() + "\n");
+    await new Promise<void>((resolve) => socket.once("data", () => resolve()));
+    server.onMessageEnd({
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "Replace the wording." }],
+      },
+    });
+
+    assert.equal(server.onAgentSettled(), "needsFinalization");
+    const proposals = server.submitProposals([
+      { title: "Replace wording", description: "Replace the README wording." },
+    ]);
+    assert.equal(server.onAgentSettled(), "completed");
+
+    const events = await eventsPromise;
+    assert.deepEqual(events.at(-1)?.actions, proposals);
+  });
 });
 
 test("emits validated proposals atomically with generated unique IDs", async () => {
@@ -136,7 +170,7 @@ test("emits validated proposals atomically with generated unique IDs", async () 
       assert.match(action.id, /^[0-9a-f-]{36}$/i);
       assert.notEqual(action.id, action.title);
     }
-    server.onAgentSettled();
+    settle(server);
 
     const events = await eventsPromise;
     assert.deepEqual(events.map((event) => event.event), [
@@ -154,7 +188,6 @@ test("rejects proposal misuse and invalid fields", async (t) => {
 
   for (const [name, proposals, message] of [
     ["not an array", {}, "must be an array"],
-    ["empty", [], "at least one action"],
     [
       "too many",
       Array.from({ length: 21 }, () => ({ title: "t", description: "d" })),
@@ -194,7 +227,7 @@ test("rejects proposal misuse and invalid fields", async (t) => {
           () => server.submitProposals(proposals),
           new RegExp(message),
         );
-        server.onAgentSettled();
+        settle(server);
         const events = await eventsPromise;
         assert.deepEqual(events.at(-1)?.actions, []);
       });
@@ -214,7 +247,7 @@ test("rejects repeated proposal calls", async () => {
       () => server.submitProposals(proposal),
       /only be called once/,
     );
-    server.onAgentSettled();
+    settle(server);
     await eventsPromise;
   });
 });
@@ -231,14 +264,14 @@ test("accepts a stored proposal exactly once without trusting client action text
       querySocket.write(request() + "\n");
       await new Promise<void>((resolve) => querySocket.once("data", () => resolve()));
       const [proposal] = server.submitProposals([{ title: "Stored", description: "Trusted lookup" }]);
-      server.onAgentSettled();
+      settle(server);
       await queryEvents;
 
       const acceptedSocket = await open(socketPath);
       const acceptedEvents = collect(acceptedSocket);
       acceptedSocket.write(request({ params: { kind: "acceptAction", actionId: proposal.id } }) + "\n");
       await new Promise<void>((resolve) => acceptedSocket.once("data", () => resolve()));
-      server.onAgentSettled();
+      settle(server);
       await acceptedEvents;
 
       const replaySocket = await open(socketPath);
@@ -264,7 +297,7 @@ test("activates and cleans up the proposal tool across lifecycle outcomes", asyn
         const eventsPromise = collect(socket);
         socket.write(request() + "\n");
         await new Promise<void>((resolve) => socket.once("data", () => resolve()));
-        server.onAgentSettled();
+        settle(server);
         await eventsPromise;
       },
     );
@@ -417,7 +450,7 @@ test("a rejected secondary client does not cancel the active request", async () 
       assert.equal(rejection.code, "busy");
       assert.equal(cancellations, 0);
 
-      server.onAgentSettled();
+      settle(server);
       const events = await activeEvents;
       assert.equal(events.at(-1)?.event, "complete");
     },

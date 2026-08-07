@@ -16,9 +16,7 @@ test("proposal guidance covers bridge response constraints", () => {
   );
   assert.ok(
     PROPOSAL_PROMPT_GUIDELINES.some(
-      (line) =>
-        line.includes("recommends, suggests, or shows") &&
-        line.includes("concrete repository change"),
+      (line) => line.includes("empty array") && line.includes("none"),
     ),
   );
   assert.ok(
@@ -45,6 +43,13 @@ test("proposal result submits the single array and terminates", () => {
   assert.deepEqual(result.details.actions, [
     { id: "generated", title: "Title", description: "Description" },
   ]);
+});
+
+test("proposal result accepts an empty finalization", () => {
+  const result = proposalToolResult(() => [], []);
+
+  assert.deepEqual(result.details.actions, []);
+  assert.equal(result.terminate, true);
 });
 
 test("dynamic activation preserves unrelated active-tool changes", () => {
