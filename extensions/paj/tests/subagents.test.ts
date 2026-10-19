@@ -24,9 +24,10 @@ const record: SpawnRecord = {
 };
 
 test("subagent listing joins active status and emits a cross-server attach command", () => {
-  const [child] = combineSubagents([record], [
-    { id: "child-paj", status: "busy" },
-  ]);
+  const [child] = combineSubagents(
+    [record],
+    [{ id: "child-paj", status: "busy" }],
+  );
 
   assert.equal(child.status, "busy");
   assert.equal(
@@ -37,6 +38,8 @@ test("subagent listing joins active status and emits a cross-server attach comma
     formatSubagents([child]),
     [
       "agent-child [busy]",
+      "  model   unknown",
+      "  task    active",
       "  id      spawn-id",
       "  cwd     /project/src",
       "  prompt  Run tests",
@@ -61,10 +64,46 @@ test("subagent listing separates agents and styles labels independently", () => 
   });
 
   assert.match(formatted, /<name>agent-child<\/name> <status>busy<\/status>/);
-  assert.match(formatted, /<label>cwd     <\/label><value>\/project\/src<\/value>/);
+  assert.match(
+    formatted,
+    /<label>cwd     <\/label><value>\/project\/src<\/value>/,
+  );
   assert.match(formatted, /<label>prompt  <\/label><value>Run tests<\/value>/);
-  assert.match(formatted, /<label>attach  <\/label><command>tmux -L paj attach-session/);
+  assert.match(
+    formatted,
+    /<label>attach  <\/label><command>tmux -L paj attach-session/,
+  );
   assert.match(formatted, /<\/command>\n\n<name>agent-two<\/name>/);
+});
+
+test("live models supersede the requested model and reflect subsequent switches", () => {
+  const requested = {
+    ...record,
+    requestedModel: "openai-codex/gpt-6.1-sol:xhigh",
+  };
+  const [starting] = combineSubagents([requested], []);
+  assert.match(
+    formatSubagents([starting]),
+    /gpt-6\.1-sol:xhigh \(unconfirmed\)/,
+  );
+  const [running] = combineSubagents(
+    [requested],
+    [{ id: "child-paj", status: "idle", model: "claude-bridge/claude-opus-5" }],
+  );
+  assert.match(
+    formatSubagents([running]),
+    /model   claude-bridge\/claude-opus-5/,
+  );
+  assert.doesNotMatch(formatSubagents([running]), /unconfirmed/);
+});
+
+test("completed assignments remain distinct from Pi activity", () => {
+  const [completed] = combineSubagents(
+    [{ ...record, taskState: "completed" }],
+    [{ id: "child-paj", status: "idle" }],
+  );
+  assert.equal(completed.status, "idle");
+  assert.match(formatSubagents([completed]), /task    completed/);
 });
 
 test("shutdown cleanup preserves children only for reload", () => {

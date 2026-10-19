@@ -65,9 +65,10 @@ mapfile -t child_args <"$runtime/child-args"
 test "${child_args[0]}" = --name
 test "${child_args[2]}" = --model
 test "${child_args[3]}" = 'openai/gpt-5.4:high'
-grep -Fq 'send a concise report of the results and any relevant checks or caveats' <<<"${child_args[4]}"
-grep -Fq 'it remains available in the subagent record owned by the parent' <<<"${child_args[4]}"
-! grep -Fq 'your Pi session ID, Paj name, spawn ID, and project root' <<<"${child_args[4]}"
+grep -Fq 'complete_subagent_task' <<<"${child_args[4]}"
+grep -Fq 'communication contract' <<<"${child_args[4]}"
+grep -Fq "$root/skills/paj/SKILL.md" <<<"${child_args[4]}"
+paj --json subagent show "$spawn_id" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["requestedModel"] == "openai/gpt-5.4:high"; assert r["taskId"]; assert r["taskState"] == "active"'
 $helper list | grep -q "$spawn_id"
 paj gc --stale-after 60 >/dev/null
 tmux -L paj has-session -t "=$tmux_id"
@@ -81,8 +82,8 @@ if paj session show "$child_session_id" >/dev/null 2>&1; then
 fi
 
 rm "$runtime/child-observed" "$runtime/child-args" "$runtime/child-session-id"
-output=$($helper spawn --project example --task 'default model')
-spawn_id=$(awk '/^spawnId:/ {print $2}' <<<"$output")
+output=$($helper spawn --json --project example --task 'default model')
+spawn_id=$(printf '%s' "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["spawnId"])')
 for _ in $(seq 1 50); do [[ -f "$runtime/child-args" ]] && break; sleep 0.1; done
 mapfile -t child_args <"$runtime/child-args"
 test "${child_args[0]}" = --name

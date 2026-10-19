@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
   cat >&2 <<'EOF'
 Usage:
-  tmux-agent spawn [--project REF] [--cwd DIR] [--model MODEL] (--task TEXT | --task-file FILE)
+  tmux-agent spawn [--json] [--project REF] [--cwd DIR] [--model MODEL] (--task TEXT | --task-file FILE)
   tmux-agent resolve PROJECT
   tmux-agent list
   tmux-agent attach SPAWN_ID_OR_NAME
@@ -73,8 +73,10 @@ case "$command" in
     task=
     task_source=
     model=
+    json=false
     while [[ $# -gt 0 ]]; do
       case "$1" in
+        --json) json=true; shift ;;
         --project) [[ $# -ge 2 ]] || usage; project=$2; shift 2 ;;
         --cwd) [[ $# -ge 2 ]] || usage; cwd=$2; shift 2 ;;
         --model) [[ $# -ge 2 && -n "$2" ]] || usage; model=$2; shift 2 ;;
@@ -114,8 +116,12 @@ case "$command" in
       echo "task cannot be empty or whitespace" >&2
       exit 1
     }
-    record=$(paj --json subagent create --parent-pi-session-id "$PAJ_PI_SESSION_ID" --parent-pid "$PAJ_PI_SESSION_PID" --cwd "$cwd" --project-root "$root" --task-file "$task_file")
+    create_args=(--json subagent create --parent-pi-session-id "$PAJ_PI_SESSION_ID" --parent-pid "$PAJ_PI_SESSION_PID" --cwd "$cwd" --project-root "$root" --task-file "$task_file")
+    [[ -z "$model" ]] || create_args+=(--model "$model")
+    [[ -z "${PAJ_TASK_ID:-}" ]] || create_args+=(--parent-task-id "$PAJ_TASK_ID")
+    record=$(paj "${create_args[@]}")
     spawn_id=$(printf '%s' "$record" | json_field spawnId)
+    task_id=$(printf '%s' "$record" | json_field taskId)
     name=$(printf '%s' "$record" | json_field name)
     tmux_name=$(printf '%s' "$record" | json_field tmuxName)
     directory=$runtime/subagent-launchers/$spawn_id
@@ -124,8 +130,9 @@ case "$command" in
     prompt=$directory/prompt
     launcher=$directory/launch.py
     environment=$directory/environment
+    paj_skill=$(realpath "$(dirname -- "${BASH_SOURCE[0]}")/../../paj/SKILL.md")
     {
-      printf 'You are a Paj subagent. Work only on the task below. Clarify uncertainties rather than guessing; resolve the exact project and obey all repository rules. When complete, send a concise report of the results and any relevant checks or caveats to parent Pi session %s using send_agent_message. Omit agent, session, spawn, and project metadata; it remains available in the subagent record owned by the parent. Do not manually acknowledge messages.\n\nTask:\n' "$PAJ_PI_SESSION_ID"
+      printf 'You are a Paj subagent. Read %s before communicating and follow its communication contract. Work only on the finite task below and obey repository rules. Your task owner is parent Pi session %s. Your task ID is %s. Finish with complete_subagent_task using that task ID and a concise summary of results, checks, and caveats.\n\nTask:\n' "$paj_skill" "$PAJ_PI_SESSION_ID" "$task_id"
       cat "$directory/task"
     } >"$prompt"
     env -0 >"$environment"
@@ -133,7 +140,7 @@ case "$command" in
 import os
 import sys
 
-environment, prompt, name, spawn, parent, task_file, model = sys.argv[1:]
+environment, prompt, name, spawn, parent, task_file, model, task_id = sys.argv[1:]
 for item in open(environment, "rb").read().split(b"\0"):
     if item and b"=" in item:
         key, value = item.split(b"=", 1)
@@ -146,6 +153,7 @@ os.environ.update({
     "PAJ_SPAWN_ID": spawn,
     "PAJ_AGENT_NAME": name,
     "PAJ_TASK": open(task_file, encoding="utf-8").read(),
+    "PAJ_TASK_ID": task_id,
 })
 args = ["pi", "--name", name]
 if model:
@@ -155,12 +163,16 @@ os.execvp("pi", args)
 EOF
     chmod 600 "$directory/task" "$prompt" "$environment" "$launcher"
     python3_path=$(command -v python3)
-    if ! tmux -L paj new-session -d -s "$tmux_name" -c "$cwd" "$python3_path" "$launcher" "$environment" "$prompt" "$name" "$spawn_id" "$PAJ_PI_SESSION_ID" "$directory/task" "$model"; then
+    if ! tmux -L paj new-session -d -s "$tmux_name" -c "$cwd" "$python3_path" "$launcher" "$environment" "$prompt" "$name" "$spawn_id" "$PAJ_PI_SESSION_ID" "$directory/task" "$model" "$task_id"; then
       paj subagent remove "$spawn_id" >/dev/null || true
       rm -rf "$directory"
       exit 1
     fi
-    printf 'spawnId: %s\nname: %s\ntmuxId: %s\nroot: %s\nattach: TMUX= tmux -L paj attach-session -t =%s\n' "$spawn_id" "$name" "$tmux_name" "$root" "$tmux_name"
+    if $json; then
+      paj --json subagent show "$spawn_id"
+    else
+      printf 'spawnId: %s\nname: %s\ntmuxId: %s\nroot: %s\nmodel: %s\nattach: TMUX= tmux -L paj attach-session -t =%s\n' "$spawn_id" "$name" "$tmux_name" "$root" "${model:-Pi startup default}" "$tmux_name"
+    fi
     ;;
   list)
     [[ $# -eq 0 ]] || usage

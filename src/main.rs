@@ -8,8 +8,8 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use paj::bridge::{BridgeClient, BridgeEvent, EditorRequest, bridge_is_available};
 use paj::project::Project;
-use paj::registry::{Message, Registration, Registry, Session};
-use paj::subagent::{SpawnRecord, SpawnStore};
+use paj::registry::{Message, MessageKind, MessageOptions, Registration, Registry, Session};
+use paj::subagent::{SpawnOptions, SpawnRecord, SpawnStore};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -73,11 +73,33 @@ enum SubagentCommands {
         #[arg(long)]
         parent_pi_session_id: String,
         #[arg(long)]
+        parent_task_id: Option<String>,
+        #[arg(long)]
         parent_pid: u32,
         #[arg(long)]
         cwd: PathBuf,
         #[arg(long)]
         project_root: PathBuf,
+        #[arg(long)]
+        task_file: PathBuf,
+        #[arg(long)]
+        model: Option<String>,
+    },
+    /// Persist a task's first result and deliver it exactly once to the owner parent.
+    Complete {
+        spawn_id: Uuid,
+        #[arg(long)]
+        from: Uuid,
+        #[arg(long)]
+        task_id: String,
+        #[arg(long)]
+        text: String,
+    },
+    /// Assign explicit new work to a completed child.
+    Assign {
+        spawn_id: Uuid,
+        #[arg(long)]
+        from: Uuid,
         #[arg(long)]
         task_file: PathBuf,
     },
@@ -98,6 +120,8 @@ enum SubagentCommands {
         #[arg(long)]
         all: bool,
     },
+    /// Retry pending durable result and assignment delivery.
+    Flush { spawn_id: Uuid },
     /// Show a spawn record.
     Show { spawn_id: Uuid },
     /// Remove a spawn record after its tmux session has stopped.
@@ -121,6 +145,8 @@ enum SessionCommands {
         #[arg(long)]
         task: Option<String>,
         #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
         cwd: Option<PathBuf>,
     },
     /// Refresh a registered session's liveness timestamp.
@@ -133,6 +159,8 @@ enum SessionCommands {
         #[arg(value_parser = ["idle", "busy"])]
         status: String,
     },
+    /// Update the full provider/model ID advertised by a live session.
+    Model { id: Uuid, model: String },
     /// Remove a session and its pending messages from the registry.
     Unregister { id: Uuid },
     /// List live sessions in the current project or all projects.
@@ -153,10 +181,20 @@ enum MessageCommands {
         from: Uuid,
         #[arg(long)]
         text: String,
+        #[arg(long, value_enum, default_value = "request")]
+        kind: MessageKind,
+        #[arg(long)]
+        task_id: Option<String>,
+        #[arg(long)]
+        in_reply_to: Option<Uuid>,
+        #[arg(long)]
+        supersedes: Option<Uuid>,
     },
     /// List messages awaiting acknowledgement by a session.
     Pending { session: Uuid },
-    /// Acknowledge and remove a pending message.
+    /// Inspect acknowledged and superseded messages retained in the archive.
+    History { session: Uuid },
+    /// Acknowledge and archive a pending message.
     Ack { session: Uuid, message: Uuid },
 }
 
@@ -236,18 +274,24 @@ fn run_subagent_command(command: SubagentCommands, json: bool) -> Result<()> {
     let record = match command {
         SubagentCommands::Create {
             parent_pi_session_id,
+            parent_task_id,
             parent_pid,
             cwd,
             project_root,
             task_file,
+            model,
         } => {
             let task = std::fs::read_to_string(task_file)?;
-            Some(store.create(
+            Some(store.create_with_options(
                 parent_pi_session_id,
                 parent_pid,
                 cwd.canonicalize()?,
                 project_root.canonicalize()?,
                 task,
+                SpawnOptions {
+                    requested_model: model,
+                    parent_task_id,
+                },
             )?)
         }
         SubagentCommands::Bind {
@@ -256,6 +300,18 @@ fn run_subagent_command(command: SubagentCommands, json: bool) -> Result<()> {
             child_paj_session_id,
             name,
         } => Some(store.bind(spawn_id, child_pi_session_id, child_paj_session_id, name)?),
+        SubagentCommands::Complete {
+            spawn_id,
+            from,
+            task_id,
+            text,
+        } => Some(store.complete(spawn_id, from, &task_id, text)?),
+        SubagentCommands::Assign {
+            spawn_id,
+            from,
+            task_file,
+        } => Some(store.assign(spawn_id, from, std::fs::read_to_string(task_file)?)?),
+        SubagentCommands::Flush { spawn_id } => Some(store.flush(spawn_id)?),
         SubagentCommands::Show { spawn_id } => Some(store.show(spawn_id)?),
         SubagentCommands::Remove { spawn_id } => Some(store.remove(spawn_id)?),
         SubagentCommands::List {
@@ -292,6 +348,7 @@ fn run_session_command(registry: &Registry, command: SessionCommands, json: bool
             role,
             parent_pi_session_id,
             task,
+            model,
             cwd,
         } => {
             let cwd = cwd.map_or_else(env::current_dir, Ok)?;
@@ -308,7 +365,7 @@ fn run_session_command(registry: &Registry, command: SessionCommands, json: bool
                     .canonicalize()
                     .context("failed to resolve working directory")?,
             };
-            let session = registry.register(&project, registration)?;
+            let session = registry.register_with_model(&project, registration, model)?;
             if json {
                 print_json(&session)
             } else {
@@ -337,6 +394,10 @@ fn run_session_command(registry: &Registry, command: SessionCommands, json: bool
                 println!("{}", session.status);
                 Ok(())
             }
+        }
+        SessionCommands::Model { id, model } => {
+            let session = registry.set_model(id, model)?;
+            if json { print_json(&session) } else { Ok(()) }
         }
         SessionCommands::Unregister { id } => {
             let session = registry.unregister(id)?;
@@ -372,8 +433,22 @@ fn run_message_command(registry: &Registry, command: MessageCommands, json: bool
             recipient,
             from,
             text,
+            kind,
+            task_id,
+            in_reply_to,
+            supersedes,
         } => {
-            let message = registry.send_message(from, &recipient, text)?;
+            let message = registry.send_message_with_options(
+                from,
+                &recipient,
+                text,
+                MessageOptions {
+                    kind,
+                    task_id,
+                    in_reply_to,
+                    supersedes,
+                },
+            )?;
             if json {
                 print_json(&message)
             } else {
@@ -383,6 +458,15 @@ fn run_message_command(registry: &Registry, command: MessageCommands, json: bool
         }
         MessageCommands::Pending { session } => {
             let messages = registry.pending_messages(session)?;
+            if json {
+                print_json(&messages)
+            } else {
+                print_messages(&messages);
+                Ok(())
+            }
+        }
+        MessageCommands::History { session } => {
+            let messages = registry.message_history(session)?;
             if json {
                 print_json(&messages)
             } else {

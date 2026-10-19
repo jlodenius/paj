@@ -1,42 +1,54 @@
 ---
 name: paj-subagents
-description: Spawn and manage tmux-backed Pi subagents for parallel work and reduced parent-session context use.
+description: >
+  Delegate finite tasks to new Pi agents, or list, attach to, and stop owned subagents.
 ---
 
 # Paj Subagents
 
-## Spawn requests are literal
+## Delegate a finite task
 
-When the user says to **spawn**, **start**, **create**, or **launch** agents, create new child agents with this skill's `scripts/tmux-agent spawn` command. A named project specifies where the new children must run; it is not a request to find or message an existing agent in that project.
+1. Establish the task, target project, constraints, and completion condition. Clarify ambiguous
+   tasks or projects; follow the target repository's rules.
+2. Use `spawn_sub_agent` to create one child per requested agent. A named project selects where the
+   new child runs; it is not a request to reuse an existing agent there. Treat “some” or “a few” as
+   three unless context specifies another count.
+3. Pass `model` only when the user requests a particular model. Otherwise let Paj resolve the
+   configured policy. Preserve an explicit provider and any `:thinking` suffix.
+4. For a launch-only request, return after successful spawns. When delegation supports a larger
+   task, continue independent work or yield for completion reports. Inspect children only when their
+   state is needed for a concrete decision or failure diagnosis.
 
-- Do not substitute an already-running agent for a requested new agent.
-- Do not ask another agent to perform the spawn on your behalf.
-- Spawn one child per requested agent. Treat “some” or “a few” as three unless context indicates another count.
-- Use Paj discovery or messaging only if the user explicitly asks to contact or reuse existing agents.
+Each child loads the `paj` skill's communication contract. For messaging, completion, or a follow-up
+assignment to an owned child, read that skill. Contact unrelated existing agents only when the user
+requests it. Spawn new children directly rather than asking another agent to spawn them.
 
-Use `scripts/tmux-agent` from the directory containing this `SKILL.md` (`paj-subagents`, not the sibling `paj` skill). Before invoking it, resolve that relative path against this skill's own location and use the resulting absolute path. Run `resolve` when a project reference is not already an exact path; never guess among candidates. Before spawning, clarify the task and project when either is ambiguous, and follow the target repository's rules.
+## Project and model selection
 
-## Script reference
+`project` accepts an exact path or an unambiguous project reference. `cwd` selects a directory
+within that project; a relative `cwd` starts at its root. Omit both to use the current project root.
+Resolution fails with candidates rather than picking an arbitrary match.
 
-| Command | Purpose |
-| --- | --- |
-| `scripts/tmux-agent resolve PROJECT` | Resolve one exact project or fail with candidates |
-| `scripts/tmux-agent spawn [--project REF] [--cwd DIR] [--model MODEL] (--task TEXT \| --task-file FILE)` | Spawn a subagent with a literal or private-file task |
-| `scripts/tmux-agent list` | List active children owned by this session |
-| `scripts/tmux-agent attach SPAWN_ID_OR_NAME` | Attach to a child session |
-| `scripts/tmux-agent stop SPAWN_ID_OR_NAME` | Stop one child |
-| `scripts/tmux-agent stop --all` | Stop all children owned by this session |
+Model precedence is an explicit spawn model, then the parent-session override, then the configured
+family rule, then inheritance when no rule matches. A matched rule with no available target fails
+rather than silently switching providers or models. Version selection and thinking level are
+separate: automatic routing preserves Pi's configured thinking defaults.
 
-## Spawning
+Personal defaults live in `paj.json` in Pi's agent directory. `/subagent-model` shows the resolved
+choice; `/subagent-model provider/id[:thinking]` overrides future children in this parent session;
+`/subagent-model auto` restores routing. Existing children and the parent's model stay unchanged.
 
-- `--cwd DIR` selects a directory within the project. With `--project`, a relative directory starts at the project root.
-- Pass `--model MODEL` only when requested. Use `provider/id` when specified and preserve any `:thinking` suffix.
-- Spawn output includes the child IDs, name, project root, and attach command.
+## Inspect, attach, or stop
 
-## After spawning
+Use `list_sub_agents` for owned children, their activity, task state, actual model, and attach
+commands. `/subagents` exposes the same information to the user. An unconfirmed model is the launch
+request, not a model reported by a running child.
 
-Once all requested spawn commands succeed, make no more tool calls for the children and return control to the user immediately.
+For attaching, stopping, or external scripts, use `scripts/tmux-agent` relative to this skill's own
+directory. Resolve it to an absolute path before invoking it. Run it without arguments for usage.
+The low-level spawn command requires an explicit `--model` to bypass Pi's ordinary startup default;
+agent delegation should use `spawn_sub_agent` so policy resolution is applied.
 
-## Completion
-
-Give each child a finite task. Never tell it to wait, sleep, or remain active; the harness keeps completed sessions attached for follow-ups. Children report completion to the stable parent Pi session ID. Do not manually acknowledge Paj messages.
+Completed sessions remain attached for explicit follow-up assignments. Give children finite work;
+the harness handles their lifetime. `/reload` preserves children, normal parent shutdown stops owned
+children, and `paj gc` cleans up orphans.

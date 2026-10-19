@@ -9,8 +9,10 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::project::Project;
+use crate::subagent::{SpawnStore, TaskState};
 
 const INBOX_DIRECTORY: &str = "inbox";
+const ARCHIVE_DIRECTORY: &str = "archive";
 const LOCK_FILE: &str = ".lock";
 const METADATA_FILE: &str = "metadata.json";
 const VALID_SESSION_STATUSES: [&str; 2] = ["idle", "busy"];
@@ -30,6 +32,8 @@ pub struct Session {
     #[serde(default)]
     pub parent_pi_session_id: Option<String>,
     pub task: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     pub status: String,
     #[serde(default)]
     pub bridge_socket: Option<PathBuf>,
@@ -56,6 +60,31 @@ pub struct MessageSender {
     pub name: String,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum MessageKind {
+    #[default]
+    Request,
+    Question,
+    Answer,
+    Update,
+    Result,
+}
+
+impl MessageKind {
+    fn is_terminal(self) -> bool {
+        matches!(self, Self::Update | Self::Result)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct MessageOptions {
+    pub kind: MessageKind,
+    pub task_id: Option<String>,
+    pub in_reply_to: Option<Uuid>,
+    pub supersedes: Option<Uuid>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Message {
@@ -64,6 +93,18 @@ pub struct Message {
     pub to: Uuid,
     pub text: String,
     pub created_at_ms: u64,
+    #[serde(default)]
+    pub kind: MessageKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient_task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_reply_to: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes: Option<Uuid>,
 }
 
 #[derive(Debug)]
@@ -93,6 +134,18 @@ impl Registry {
         project: &Project,
         registration: Registration,
     ) -> Result<Session, RegistryError> {
+        self.register_with_model(project, registration, None)
+    }
+
+    pub fn register_with_model(
+        &self,
+        project: &Project,
+        registration: Registration,
+        model: Option<String>,
+    ) -> Result<Session, RegistryError> {
+        if let Some(model) = &model {
+            validate_model(model)?;
+        }
         let id = Uuid::now_v7();
         let now = now_ms()?;
         let simple_id = id.simple().to_string();
@@ -111,6 +164,7 @@ impl Registry {
             role: registration.role,
             parent_pi_session_id: registration.parent_pi_session_id,
             task: registration.task,
+            model,
             status: "idle".to_owned(),
             bridge_socket: None,
             started_at_ms: now,
@@ -163,11 +217,24 @@ impl Registry {
         Ok(session)
     }
 
+    pub fn set_model(&self, id: Uuid, model: String) -> Result<Session, RegistryError> {
+        validate_model(&model)?;
+        let session_dir = self.find_session_dir(id)?;
+        let lock = open_lock(&session_dir)?;
+        lock.lock_exclusive()?;
+        let mut session = read_session(&session_dir)?;
+        session.model = Some(model);
+        write_json_atomically(&session_dir.join(METADATA_FILE), &session)?;
+        Ok(session)
+    }
+
     pub fn unregister(&self, id: Uuid) -> Result<Session, RegistryError> {
+        let _protocol = lock_protocol(&self.root)?;
         let session_dir = self.find_session_dir(id)?;
         let lock = open_lock(&session_dir)?;
         lock.lock_exclusive()?;
         let session = read_session(&session_dir)?;
+        self.archive_pending_messages(id, &session_dir)?;
         fs::remove_dir_all(session_dir)?;
         Ok(session)
     }
@@ -242,8 +309,150 @@ impl Registry {
         recipient: &str,
         text: String,
     ) -> Result<Message, RegistryError> {
+        self.send_message_with_options(sender_id, recipient, text, MessageOptions::default())
+    }
+
+    pub fn send_message_with_options(
+        &self,
+        sender_id: Uuid,
+        recipient: &str,
+        text: String,
+        mut options: MessageOptions,
+    ) -> Result<Message, RegistryError> {
+        let _protocol = lock_protocol(&self.root)?;
         let sender = self.show(sender_id)?;
         let recipient = self.resolve_live_session(recipient)?;
+        let records = SpawnStore::new(self.root.clone())
+            .and_then(|store| store.list(None, false))
+            .map_err(|error| RegistryError::Protocol(error.to_string()))?;
+        let sender_task = records.iter().find(|record| record.matches_child(&sender));
+        let recipient_task = records
+            .iter()
+            .find(|record| record.matches_child(&recipient));
+        if sender_task.is_some() && options.kind == MessageKind::Result {
+            return Err(RegistryError::Protocol(
+                "subagent results must use subagent complete".to_owned(),
+            ));
+        }
+        if options.kind == MessageKind::Answer && options.in_reply_to.is_none() {
+            return Err(RegistryError::Protocol(
+                "answers must specify inReplyTo".to_owned(),
+            ));
+        }
+        if sender_task.is_some_and(|record| record.task_state == TaskState::Completed)
+            && options.kind != MessageKind::Update
+        {
+            return Err(RegistryError::Protocol(
+                "completed subagents may only send updates; assign a new task first".to_owned(),
+            ));
+        }
+        if recipient_task.is_some_and(|record| record.task_state == TaskState::Completed) {
+            return Err(RegistryError::Protocol(
+                "recipient task is completed; use subagent assign for new work".to_owned(),
+            ));
+        }
+        let reporting = sender_task.filter(|record| {
+            recipient.pi_session_id.as_deref() == Some(&record.parent_pi_session_id)
+        });
+        let scope = reporting.or(recipient_task);
+        let sender_task_id = sender_task.map(|record| record.task_id.clone());
+        let recipient_task_id = recipient_task.map(|record| record.task_id.clone());
+        let pending = self.pending_messages(recipient.id)?;
+        let mut received = self.message_history(recipient.id)?;
+        received.extend(pending.iter().cloned());
+        let mut sent = self.message_history(sender.id)?;
+        sent.extend(self.pending_messages(sender.id)?);
+        if let Some(id) = options.in_reply_to {
+            let original = sent
+                .iter()
+                .find(|message| message.id == id)
+                .ok_or(RegistryError::MessageNotFound(id))?;
+            if original.kind.is_terminal() {
+                return Err(RegistryError::Protocol(
+                    "cannot reply to a terminal result or update".to_owned(),
+                ));
+            }
+            let assignments_match =
+                if original.sender_task_id.is_some() || original.recipient_task_id.is_some() {
+                    original.sender_task_id == recipient_task_id
+                        && original.recipient_task_id == sender_task_id
+                } else {
+                    scope.is_none_or(|record| original.task_id.as_ref() == Some(&record.task_id))
+                };
+            if original.from.id != recipient.id
+                || original.to != sender.id
+                || !assignments_match
+                || options
+                    .task_id
+                    .as_ref()
+                    .is_some_and(|id| original.task_id.as_ref() != Some(id))
+            {
+                return Err(RegistryError::Protocol(
+                    "reply must match the original participants, task, and active assignments"
+                        .to_owned(),
+                ));
+            }
+            options.task_id = original.task_id.clone();
+        } else if let Some(record) = scope {
+            if options
+                .task_id
+                .as_ref()
+                .is_some_and(|id| id != &record.task_id)
+            {
+                return Err(RegistryError::Protocol(
+                    "message task ID is stale or mismatched".to_owned(),
+                ));
+            }
+            options.task_id = Some(record.task_id.clone());
+        }
+        if options.task_id.as_deref() == Some("") {
+            return Err(RegistryError::Protocol(
+                "task ID cannot be empty".to_owned(),
+            ));
+        }
+        if let Some(id) = options.supersedes {
+            let original = pending
+                .iter()
+                .find(|message| message.id == id)
+                .ok_or_else(|| {
+                    RegistryError::Protocol("only pending messages may be superseded".to_owned())
+                })?;
+            if original.from.id != sender.id
+                || original.to != recipient.id
+                || original.task_id != options.task_id
+                || ((original.sender_task_id.is_some() || original.recipient_task_id.is_some())
+                    && (original.sender_task_id != sender_task_id
+                        || original.recipient_task_id != recipient_task_id))
+            {
+                return Err(RegistryError::Protocol(
+                    "supersession must match the original sender, recipient, and task".to_owned(),
+                ));
+            }
+        }
+        if options.kind == MessageKind::Question {
+            let unanswered = received.iter().any(|question| {
+                question.kind == MessageKind::Question
+                    && question.from.id == sender.id
+                    && question.task_id == options.task_id
+                    && ((question.sender_task_id.is_none() && question.recipient_task_id.is_none())
+                        || (question.sender_task_id == sender_task_id
+                            && question.recipient_task_id == recipient_task_id))
+                    && Some(question.id) != options.supersedes
+                    && !received
+                        .iter()
+                        .any(|message| message.supersedes == Some(question.id))
+                    && !sent.iter().any(|answer| {
+                        answer.kind == MessageKind::Answer
+                            && answer.from.id == recipient.id
+                            && answer.in_reply_to == Some(question.id)
+                    })
+            });
+            if unanswered {
+                return Err(RegistryError::Protocol(
+                    "an unanswered question already exists for this sender, recipient, and task; answer it or explicitly supersede a pending question".to_owned(),
+                ));
+            }
+        }
         let message = Message {
             id: Uuid::now_v7(),
             from: MessageSender {
@@ -253,39 +462,81 @@ impl Registry {
             to: recipient.id,
             text,
             created_at_ms: now_ms()?,
+            kind: options.kind,
+            task_id: options.task_id,
+            sender_task_id,
+            recipient_task_id,
+            in_reply_to: options.in_reply_to,
+            supersedes: options.supersedes,
         };
-        let session_dir = self.session_dir(&recipient.project_id, recipient.id);
-        let lock = open_lock(&session_dir)?;
-        lock.lock_exclusive()?;
-        let path = session_dir
-            .join(INBOX_DIRECTORY)
-            .join(format!("{}.json", message.id));
-        write_json_atomically(&path, &message)?;
+        self.enqueue_message(&message)?;
         Ok(message)
     }
 
+    pub(crate) fn enqueue_message(&self, message: &Message) -> Result<(), RegistryError> {
+        let directory = self.find_session_dir(message.to)?;
+        let lock = open_lock(&directory)?;
+        lock.lock_exclusive()?;
+        let filename = format!("{}.json", message.id);
+        if !self.message_was_archived(message.id)?
+            && !directory.join(INBOX_DIRECTORY).join(&filename).is_file()
+        {
+            write_json_atomically(&directory.join(INBOX_DIRECTORY).join(filename), message)?;
+        }
+        if let Some(id) = message.supersedes {
+            archive_message(&directory, &self.archive_dir(message.to), id)?;
+        }
+        Ok(())
+    }
+
     pub fn pending_messages(&self, session_id: Uuid) -> Result<Vec<Message>, RegistryError> {
+        self.read_messages(session_id, INBOX_DIRECTORY)
+    }
+
+    pub fn message_history(&self, session_id: Uuid) -> Result<Vec<Message>, RegistryError> {
+        let directory = self.archive_dir(session_id);
+        if !directory.is_dir() {
+            self.find_session_dir(session_id)?;
+        }
+        read_message_directory(&directory)
+    }
+
+    fn archive_dir(&self, session_id: Uuid) -> PathBuf {
+        self.root
+            .join(ARCHIVE_DIRECTORY)
+            .join(session_id.to_string())
+    }
+
+    fn message_was_archived(&self, message_id: Uuid) -> Result<bool, RegistryError> {
+        let directories = match fs::read_dir(self.root.join(ARCHIVE_DIRECTORY)) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        for directory in directories {
+            if directory?
+                .path()
+                .join(format!("{message_id}.json"))
+                .is_file()
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn archive_pending_messages(&self, id: Uuid, directory: &Path) -> Result<(), RegistryError> {
+        for message in read_message_directory(&directory.join(INBOX_DIRECTORY))? {
+            archive_message(directory, &self.archive_dir(id), message.id)?;
+        }
+        Ok(())
+    }
+
+    fn read_messages(&self, session_id: Uuid, folder: &str) -> Result<Vec<Message>, RegistryError> {
         let session_dir = self.find_session_dir(session_id)?;
         let lock = open_lock(&session_dir)?;
         lock.lock_shared()?;
-        let inbox = session_dir.join(INBOX_DIRECTORY);
-        let Ok(entries) = fs::read_dir(inbox) else {
-            return Ok(Vec::new());
-        };
-        let mut messages: Vec<Message> = Vec::new();
-        for entry in entries {
-            let entry = entry?;
-            if entry.file_type()?.is_file()
-                && entry
-                    .path()
-                    .extension()
-                    .is_some_and(|extension| extension == "json")
-            {
-                messages.push(read_json(&entry.path())?);
-            }
-        }
-        messages.sort_by_key(|message| message.created_at_ms);
-        Ok(messages)
+        read_message_directory(&session_dir.join(folder))
     }
 
     pub fn acknowledge_message(
@@ -293,20 +544,15 @@ impl Registry {
         session_id: Uuid,
         message_id: Uuid,
     ) -> Result<(), RegistryError> {
+        let _protocol = lock_protocol(&self.root)?;
         let session_dir = self.find_session_dir(session_id)?;
         let lock = open_lock(&session_dir)?;
         lock.lock_exclusive()?;
-        let path = session_dir
-            .join(INBOX_DIRECTORY)
-            .join(format!("{message_id}.json"));
-        if !path.is_file() {
-            return Err(RegistryError::MessageNotFound(message_id));
-        }
-        fs::remove_file(path)?;
-        Ok(())
+        archive_message(&session_dir, &self.archive_dir(session_id), message_id)
     }
 
     pub fn gc(&self, stale_after: Duration) -> Result<Vec<Session>, RegistryError> {
+        let _protocol = lock_protocol(&self.root)?;
         let now = now_ms()?;
         let stale_after_ms = duration_ms(stale_after);
         let candidates = self.list(None)?;
@@ -320,6 +566,7 @@ impl Registry {
             lock.lock_exclusive()?;
             let session = read_session(&directory)?;
             if session_is_stale(&session, now, stale_after_ms) {
+                self.archive_pending_messages(session.id, &directory)?;
                 fs::remove_dir_all(directory)?;
                 removed.push(session);
             }
@@ -345,6 +592,19 @@ impl Registry {
         }
     }
 
+    pub(crate) fn resolve_live_pi_session(&self, pi_id: &str) -> Result<Session, RegistryError> {
+        let matches: Vec<_> = self
+            .list_live(None, Duration::from_secs(60))?
+            .into_iter()
+            .filter(|session| session.pi_session_id.as_deref() == Some(pi_id))
+            .collect();
+        match matches.as_slice() {
+            [] => Err(RegistryError::RecipientNotFound(pi_id.to_owned())),
+            [session] => Ok(session.clone()),
+            _ => Err(RegistryError::AmbiguousRecipient(pi_id.to_owned())),
+        }
+    }
+
     fn session_dir(&self, project_id: &str, session_id: Uuid) -> PathBuf {
         self.root
             .join("projects")
@@ -364,6 +624,67 @@ impl Registry {
         }
         Err(RegistryError::SessionNotFound(id))
     }
+}
+
+pub(crate) fn lock_protocol(root: &Path) -> Result<File, RegistryError> {
+    let path = root.join(".protocol.lock");
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)?;
+    set_private_file_permissions(&path)?;
+    file.lock_exclusive()?;
+    Ok(file)
+}
+
+pub(crate) fn validate_model(model: &str) -> Result<(), RegistryError> {
+    if model.trim() != model
+        || model.chars().any(char::is_whitespace)
+        || !model
+            .split_once('/')
+            .is_some_and(|(provider, id)| !provider.is_empty() && !id.is_empty())
+    {
+        return Err(RegistryError::InvalidModel);
+    }
+    Ok(())
+}
+
+fn read_message_directory(directory: &Path) -> Result<Vec<Message>, RegistryError> {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut messages: Vec<Message> = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_type()?.is_file()
+            && entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "json")
+        {
+            messages.push(read_json(&entry.path())?);
+        }
+    }
+    messages.sort_by_key(|message| (message.created_at_ms, message.id));
+    Ok(messages)
+}
+
+fn archive_message(directory: &Path, archive: &Path, id: Uuid) -> Result<(), RegistryError> {
+    let filename = format!("{id}.json");
+    let source = directory.join(INBOX_DIRECTORY).join(&filename);
+    let destination = archive.join(filename);
+    if source.is_file() {
+        fs::create_dir_all(archive)?;
+        set_private_directory_permissions(archive)?;
+        fs::rename(source, destination)?;
+    } else if !destination.is_file() {
+        return Err(RegistryError::MessageNotFound(id));
+    }
+    Ok(())
 }
 
 fn read_session(directory: &Path) -> Result<Session, RegistryError> {
@@ -483,6 +804,10 @@ pub enum RegistryError {
     InvalidSessionStatus(String),
     #[error("message {0} was not found")]
     MessageNotFound(Uuid),
+    #[error("model must be a full provider/model ID")]
+    InvalidModel,
+    #[error("{0}")]
+    Protocol(String),
     #[error("failed to read session metadata at {path}")]
     ReadMetadata {
         path: PathBuf,

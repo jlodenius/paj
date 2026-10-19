@@ -4,6 +4,7 @@ set -euo pipefail
 root=$(git rev-parse --show-toplevel)
 name="lifecycle-recovery-$$"
 runtime=$(mktemp -d)
+export PAJ_RUNTIME_DIR="$runtime"
 log="$runtime/pi.log"
 mkfifo "$runtime/input"
 exec 3<>"$runtime/input"
@@ -32,6 +33,7 @@ sleep 3
 session=$(paj --json session list | jq -ec --arg name "$name" '.[] | select(.name == $name)')
 new_id=$(jq -er .id <<<"$session")
 socket=$(jq -er .bridgeSocket <<<"$session")
+jq -e '.model | type == "string" and contains("/")' <<<"$session" >/dev/null
 
 test "$new_id" != "$old_id"
 test -S "$socket"

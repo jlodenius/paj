@@ -1,6 +1,13 @@
+export interface TaskResultSummary {
+  taskId: string;
+  parentTaskId?: string;
+  delivered: boolean;
+}
+
 export interface SpawnRecord {
   spawnId: string;
   parentPiSessionId: string;
+  parentTaskId?: string;
   parentPid: number;
   childPiSessionId?: string;
   childPajSessionId?: string;
@@ -9,17 +16,25 @@ export interface SpawnRecord {
   cwd: string;
   projectRoot: string;
   task: string;
+  taskId?: string;
+  taskState?: "active" | "completed";
+  requestedModel?: string;
+  result?: TaskResultSummary;
+  resultHistory?: TaskResultSummary[];
+  assignment?: { delivered: boolean };
   createdAtMs: number;
 }
 
 export interface SubagentSession {
   id: string;
   status: string;
+  model?: string;
 }
 
 export interface ListedSubagent extends SpawnRecord {
   status: "idle" | "busy" | "starting";
   attachCommand: string;
+  model?: string;
 }
 
 export function combineSubagents(
@@ -27,18 +42,28 @@ export function combineSubagents(
   sessions: SubagentSession[],
 ): ListedSubagent[] {
   const byId = new Map(sessions.map((session) => [session.id, session]));
-  return records.map((record) => ({
-    ...record,
-    status:
-      (record.childPajSessionId
-        ? byId.get(record.childPajSessionId)?.status
-        : undefined) === "busy"
-        ? "busy"
-        : record.childPajSessionId && byId.has(record.childPajSessionId)
-          ? "idle"
-          : "starting",
-    attachCommand: `TMUX= tmux -L paj attach-session -t =${record.tmuxName}`,
-  }));
+  return records.map(
+    ({
+      result: _result,
+      resultHistory: _history,
+      assignment: _assignment,
+      ...record
+    }) => ({
+      ...record,
+      model: record.childPajSessionId
+        ? byId.get(record.childPajSessionId)?.model
+        : undefined,
+      status:
+        (record.childPajSessionId
+          ? byId.get(record.childPajSessionId)?.status
+          : undefined) === "busy"
+          ? "busy"
+          : record.childPajSessionId && byId.has(record.childPajSessionId)
+            ? "idle"
+            : "starting",
+      attachCommand: `TMUX= tmux -L paj attach-session -t =${record.tmuxName}`,
+    }),
+  );
 }
 
 export function shouldStopSubagents(reason: string): boolean {
@@ -99,6 +124,16 @@ export function formatSubagents(
       const attach = child.attachCommand.replace(/^TMUX= tmux /, "tmux ");
       return [
         `${style.name(child.name)} ${style.status(child.status)}`,
+        row(
+          "model",
+          style.value(
+            child.model ??
+              (child.requestedModel
+                ? `${child.requestedModel} (unconfirmed)`
+                : "unknown"),
+          ),
+        ),
+        row("task", style.value(child.taskState ?? "active")),
         row("id", style.value(child.spawnId)),
         row("cwd", style.value(child.cwd)),
         row("prompt", style.value(child.task.split("\n", 1)[0])),
