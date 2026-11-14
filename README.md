@@ -5,25 +5,39 @@
 
 ## Install
 
-The CLI and the Pi integration are installed separately. These commands install only the `paj`
-binary:
+Requires Pi and a Rust toolchain. Subagents also require `tmux` and Python 3.
+
+Install the CLI and the Pi extension/skills separately:
 
 ```sh
-nix profile install github:jlodenius/paj
-# or, from a source checkout
-cargo install --path .
-```
-
-For the full setup, also install the Pi package, which loads this repository's extension and skill:
-
-```sh
+cargo install --git https://github.com/jlodenius/paj --locked
 pi install git:github.com/jlodenius/paj
 ```
 
-Alternatively, link `extensions/paj`, `skills/paj`, and `skills/paj-subagents` into their matching
-paths under `~/.pi/agent`. From a checkout, `pi -e .` loads the package temporarily. Every option
-still requires the `paj` binary on `PATH`. The subagent workflow also requires `tmux` and Python 3;
-the Nix package propagates both.
+Keep `paj` on your `PATH`, then run `/reload` in already-open Pi sessions.
+
+### NixOS
+
+On NixOS with Home Manager, use this instead of the commands above. Add the GitHub flake input:
+
+```nix
+inputs.paj = {
+  url = "github:jlodenius/paj";
+  inputs.nixpkgs.follows = "nixpkgs";
+};
+```
+
+In your Home Manager user configuration, with `inputs` available in the module scope:
+
+```nix
+home.packages = [inputs.paj.packages.${pkgs.stdenv.hostPlatform.system}.default];
+home.file.".pi/agent/extensions/paj".source = "${inputs.paj}/extensions/paj";
+home.file.".pi/agent/skills/paj".source = "${inputs.paj}/skills/paj";
+home.file.".pi/agent/skills/paj-subagents".source = "${inputs.paj}/skills/paj-subagents";
+```
+
+The flake includes `tmux` and Python 3. Rebuild NixOS, then run `/reload` in Pi. Home Manager loads
+the extension and skills, so skip `pi install`.
 
 ## Session discovery
 
