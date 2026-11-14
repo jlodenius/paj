@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
@@ -61,6 +62,7 @@ async function harness(options: { child?: boolean; busy?: boolean } = {}) {
   const branch: Item[] = [];
   const intervals: Array<() => void> = [];
   let inbox: Item[] = [];
+  let pendingHook: (() => Promise<void> | void) | undefined;
   let children: Item[] = [];
   let record: Item = {
     spawnId: "spawn",
@@ -86,7 +88,15 @@ async function harness(options: { child?: boolean; busy?: boolean } = {}) {
     },
     modelRegistry: { getAvailable: () => models },
   };
+  const bus = new EventEmitter();
   const pi = {
+    events: {
+      emit: (name: string, data: unknown) => bus.emit(name, data),
+      on(name: string, callback: (data: unknown) => void) {
+        bus.on(name, callback);
+        return () => bus.off(name, callback);
+      },
+    },
     on: (name: string, callback: (...args: any[]) => any) =>
       events.set(name, callback),
     registerTool: (tool: Item) => tools.set(tool.name, tool),
@@ -157,6 +167,7 @@ async function harness(options: { child?: boolean; busy?: boolean } = {}) {
         } else response = record;
       } else if (parts[0] === "message" && parts[1] === "pending") {
         response = [...inbox];
+        await pendingHook?.();
       } else if (parts[0] === "message" && parts[1] === "ack") {
         inbox = inbox.filter((message) => message.id !== parts[3]);
       } else if (parts[0] === "message" && parts[1] === "send") {
@@ -185,6 +196,11 @@ async function harness(options: { child?: boolean; busy?: boolean } = {}) {
   return {
     commands,
     tools,
+    external: () => {
+      let api: Item | undefined;
+      bus.emit("paj:external:v1", { reply: (value: Item) => { api = value; } });
+      return api!;
+    },
     calls,
     messages,
     notices,
@@ -198,6 +214,9 @@ async function harness(options: { child?: boolean; busy?: boolean } = {}) {
     },
     setInbox: (value: Item[]) => {
       inbox = value;
+    },
+    beforePendingReturns: (callback?: () => Promise<void> | void) => {
+      pendingHook = callback;
     },
     setChildren: (value: Item[]) => {
       children = value;
@@ -540,6 +559,62 @@ test("a new assignment reaches a completed child with a new task identity", asyn
       summary: "done",
     });
     assert.equal(result.details.taskState, "completed");
+  } finally {
+    await h.close();
+  }
+});
+
+test("inbox polling defers reserved external input at entry and after pending fetch", async () => {
+  const h = await harness();
+  try {
+    const api = h.external();
+    h.setInbox([{ id: "inbox", kind: "request", from: { name: "peer" }, text: "work" }]);
+    const pendingCalls = () => h.calls.filter(call =>
+      call.args.includes("pending")).length;
+    const before = pendingCalls();
+    assert.equal(api.tryReserve("browser"), true);
+    await h.poll();
+    assert.equal(pendingCalls(), before);
+    assert.equal(h.messages.length, 0);
+    assert.equal(h.inbox().length, 1);
+    api.release("browser");
+    h.beforePendingReturns(() => { assert.equal(api.tryReserve("racing-browser"), true); });
+    await h.poll();
+    assert.equal(pendingCalls(), before + 1);
+    assert.equal(h.messages.length, 0);
+    assert.equal(h.inbox().length, 1);
+    assert.equal(h.calls.some(call => call.args.includes("ack")), false);
+    h.beforePendingReturns();
+    api.release("racing-browser");
+    await h.poll();
+    assert.equal(h.messages.length, 1);
+    assert.equal(h.messages[0].details.messageIds[0], "inbox");
+    assert.equal(h.inbox().length, 0);
+  } finally {
+    await h.close();
+  }
+});
+
+test("external session API publishes readiness and reserves without read-only contamination", async () => {
+  const h = await harness();
+  try {
+    const api = h.external();
+    assert.equal(api.version, 1);
+    assert.equal(api.getSnapshot().identity.id, "session");
+    assert.equal(api.getSnapshot().identity.piSessionId, "pi-session");
+    assert.equal(api.tryReserve("browser"), true);
+    assert.equal(api.getSnapshot().externalBusy, true);
+    const start = await h.event("before_agent_start", {
+      systemPrompt: "original system prompt",
+      messageType: "user",
+    });
+    assert.equal(start, undefined);
+    assert.equal(await h.event("tool_call", { toolName: "write" }), undefined);
+    await h.event("agent_start");
+    assert.equal(api.getSnapshot().externalBusy, false);
+    await h.event("session_shutdown", { reason: "reload" });
+    assert.equal(api.getSnapshot().identity, null);
+    assert.equal(api.tryReserve("stale"), false);
   } finally {
     await h.close();
   }

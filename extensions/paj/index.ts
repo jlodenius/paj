@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
 
 import { renamePajSession } from "./agent-name.ts";
+import { createExternalSession } from "./external-session.ts";
 import {
   BridgeServer,
   type EditorRequest,
@@ -92,6 +93,14 @@ export default function pajExtension(pi: ExtensionAPI) {
   let messageTimer: ReturnType<typeof setInterval> | undefined;
   let messagePollPending: Promise<void> | undefined;
   let bridge: BridgeServer | undefined;
+  const externalSession = createExternalSession(
+    () => Boolean(bridge?.getActiveRequest()),
+    () => pi.events?.emit("paj:external:changed:v1", undefined),
+  );
+  pi.events?.on("paj:external:v1", (request: unknown) => {
+    const query = request as { reply?: (api: typeof externalSession.api) => void };
+    query?.reply?.(externalSession.api);
+  });
   let registrationPending: Promise<void> | undefined;
   let registrationRetryTimer: ReturnType<typeof setTimeout> | undefined;
   let registrationRetryMs = REGISTRATION_RETRY_INITIAL_MS;
@@ -266,6 +275,10 @@ export default function pajExtension(pi: ExtensionAPI) {
       throw new Error("paj registration changed while renaming");
     }
     registeredName = session.name;
+    const externalIdentity = externalSession.api.getSnapshot().identity;
+    if (externalIdentity) {
+      externalSession.update({ ...externalIdentity, name: session.name });
+    }
     const spawnId = process.env.PAJ_SPAWN_ID;
     if (spawnId) {
       await execPaj(
@@ -287,7 +300,7 @@ export default function pajExtension(pi: ExtensionAPI) {
   };
 
   const pollMessages = async (ctx: ExtensionContext, sessionId: string) => {
-    if (!ctx.isIdle() || bridge?.getActiveRequest()) return;
+    if (!ctx.isIdle() || bridge?.getActiveRequest() || externalSession.isReserved()) return;
     const output = await execPaj(
       ["--json", "message", "pending", sessionId],
       ctx.cwd,
@@ -355,7 +368,8 @@ export default function pajExtension(pi: ExtensionAPI) {
         sessionId === activeSessionId &&
         !shuttingDown &&
         ctx.isIdle() &&
-        !bridge?.getActiveRequest(),
+        !bridge?.getActiveRequest() &&
+        !externalSession.isReserved(),
       currentTask
         ? {
             taskId: currentTask.taskId ?? currentTask.spawnId,
@@ -383,6 +397,7 @@ export default function pajExtension(pi: ExtensionAPI) {
     const previousSessionId = activeSessionId;
     bridge = undefined;
     activeSessionId = undefined;
+    externalSession.update(null);
     await statusUpdatePending?.catch(() => undefined);
     await modelUpdatePending?.catch(() => undefined);
     if (previousBridge) {
@@ -461,10 +476,13 @@ export default function pajExtension(pi: ExtensionAPI) {
       throw new Error("paj session did not advertise a bridge socket");
     }
     const nextBridge = new BridgeServer({
-      isIdle: () => ctx.isIdle(),
+      isIdle: () => ctx.isIdle() && !externalSession.isReserved(),
       sendRequest: sendEditorRequest,
       cancelRequest: () => ctx.abort(),
-      setRequestToolsActive,
+      setRequestToolsActive: (request) => {
+        setRequestToolsActive(request);
+        externalSession.notify();
+      },
     });
     try {
       await nextBridge.start(session.bridgeSocket);
@@ -476,6 +494,7 @@ export default function pajExtension(pi: ExtensionAPI) {
     }
     bridge = nextBridge;
     activeSessionId = session.id;
+    externalSession.update(session);
     registeredName = session.name;
     registeredModel = session.model;
     pi.appendEntry(REGISTRATION_ENTRY, { id: session.id });
@@ -796,6 +815,7 @@ export default function pajExtension(pi: ExtensionAPI) {
   });
 
   pi.on("agent_start", async (_event, ctx) => {
+    externalSession.clearReservations();
     await queueStatusUpdate(ctx, "busy").catch(() => undefined);
   });
 
@@ -808,6 +828,7 @@ export default function pajExtension(pi: ExtensionAPI) {
   });
 
   pi.on("agent_settled", async (_event, ctx) => {
+    externalSession.clearReservations();
     const result = bridge?.onAgentSettled();
     if (result === "needsFinalization") {
       pi.sendMessage(
