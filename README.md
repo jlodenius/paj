@@ -67,6 +67,7 @@ provider. Use `/subagent-model` in Pi to inspect the choice.
 
 Pi sessions register automatically. Use `/agents all` to find agents,
 `/agent-send <agent> <message>` to send a message, and `/subagents` to inspect children.
+Agents can use `inspect_agent` to observe live progress without prompting the target.
 
 From the terminal:
 
@@ -82,6 +83,7 @@ Set `PAJ_PROJECT_DIRS` to comma-separated project search roots; the default is `
 
 - [Agent communication](skills/paj/SKILL.md)
 - [Subagent workflow and model overrides](skills/paj-subagents/SKILL.md)
+- [Read-only agent inspection](docs/inspection.md)
 - [Neovim integration](https://github.com/jlodenius/paj.nvim)
 - [Remote control from your phone or browser](https://github.com/jlodenius/paj-rc)
 
@@ -94,4 +96,11 @@ cargo clippy --all-targets --all-features --locked -- -D warnings
 npm test
 ./tests/lifecycle-recovery.sh
 ./tests/tmux-agent.sh
+```
+
+Run isolated live inspection checks with installed Pi and Paj:
+
+```sh
+PAJ_INSPECTION_PI_BIN=$(command -v pi) \
+  PAJ_INSPECTION_PAJ_BIN=$(command -v paj) npm test
 ```

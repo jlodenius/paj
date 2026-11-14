@@ -44,6 +44,10 @@ Use `list_sub_agents` for owned children, their activity, task state, actual mod
 commands. `/subagents` exposes the same information to the user. An unconfirmed model is the launch
 request, not a model reported by a running child.
 
+For live progress evidence, use `inspect_agent` with the child's exact `childPajSessionId` or
+`childPiSessionId` from that list. This reads visible text and tool activity without waking or
+interrupting it. Follow the Paj skill's inspection rules; progress is not proof of completion.
+
 For attaching, stopping, or external scripts, use `scripts/tmux-agent` relative to this skill's own
 directory. Resolve it to an absolute path before invoking it. Run it without arguments for usage.
 The low-level spawn command requires an explicit `--model` to bypass Pi's ordinary startup default;

@@ -131,6 +131,8 @@ async function harness(options: { child?: boolean; busy?: boolean } = {}) {
           piSessionId: "pi-session",
           pid: process.pid,
           name: "test-agent",
+          role: options.child ? "subagent" : "primary",
+          ...(options.child ? { parentPiSessionId: "parent" } : {}),
           status: "idle",
           model: value("--model"),
           bridgeSocket: join(directory, "bridge.sock"),
