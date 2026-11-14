@@ -83,7 +83,7 @@ Set `PAJ_PROJECT_DIRS` to comma-separated project search roots; the default is `
 - [Agent communication](skills/paj/SKILL.md)
 - [Subagent workflow and model overrides](skills/paj-subagents/SKILL.md)
 - [Neovim integration](https://github.com/jlodenius/paj.nvim)
-- [Browser access](https://github.com/jlodenius/paj-rc)
+- [Remote control from your phone or browser](https://github.com/jlodenius/paj-rc)
 
 ## Development
 
