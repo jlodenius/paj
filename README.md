@@ -67,7 +67,9 @@ provider. Use `/subagent-model` in Pi to inspect the choice.
 
 Pi sessions register automatically. Use `/agents all` to find agents,
 `/agent-send <agent> <message>` to send a message, and `/subagents` to inspect children.
-Agents can use `inspect_agent` to observe live progress without prompting the target.
+Agents can use `inspect_agent` to observe live progress without prompting the target. Access is
+ownership-checked; hidden reasoning and raw tool payloads are excluded. Visible text may still be
+sensitive and becomes part of the inspecting agent's model context.
 
 From the terminal:
 
@@ -83,7 +85,6 @@ Set `PAJ_PROJECT_DIRS` to comma-separated project search roots; the default is `
 
 - [Agent communication](skills/paj/SKILL.md)
 - [Subagent workflow and model overrides](skills/paj-subagents/SKILL.md)
-- [Read-only agent inspection](docs/inspection.md)
 - [Neovim integration](https://github.com/jlodenius/paj.nvim)
 - [Remote control from your phone or browser](https://github.com/jlodenius/paj-rc)
 
