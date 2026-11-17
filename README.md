@@ -63,6 +63,13 @@ Subagents inherit the parent model by default. To route by model family, create
 Adjust the family rules to your models. Rules select the latest available child family on the same
 provider. Use `/subagent-model` in Pi to inspect the choice.
 
+The same `paj.json` holds optional `captain` and `voice` sections. Each addon validates its own
+section; Paj's model policy reads only `subagents`. Merge addon settings alongside existing sections
+rather than replacing the file with an addon example. The addons remain optional.
+
+Older Paj extensions reject these additional sections. Upgrade the affected packages and restart
+Pi sessions when migrating the live file.
+
 ## Usage
 
 Pi sessions register automatically. Use `/agents all` to find agents,

@@ -143,7 +143,7 @@ export function loadModelPolicy(agentDir: string): ModelPolicy {
     const parsed: unknown = JSON.parse(text);
     assertUniqueJsonKeys(text);
     const config = objectAt(parsed, "paj.json");
-    onlyKeys(config, ["subagents"], "paj.json");
+    onlyKeys(config, ["subagents", "captain", "voice"], "paj.json");
     if (!Object.hasOwn(config, "subagents"))
       return policyAt({}, "subagents.model");
     const subagents = objectAt(config.subagents, "subagents");

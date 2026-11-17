@@ -69,6 +69,20 @@ test("configuration is read from the supplied agent directory", (t) => {
   assert.deepEqual(loadModelPolicy(dir), policy);
 });
 
+test("shared addon settings do not alter subagent model policy", (t) => {
+  const dir = configDir(t, JSON.stringify({
+    subagents: { model: policy },
+    captain: { version: 1, reporting: { progress: true } },
+    voice: { version: 1, languages: ["en"] },
+  }));
+  assert.deepEqual(loadModelPolicy(dir), policy);
+});
+
+test("Paj leaves addon section validation to its owners", (t) => {
+  const dir = configDir(t, JSON.stringify({ captain: null, voice: ["invalid"] }));
+  assert.deepEqual(loadModelPolicy(dir), defaultPolicy);
+});
+
 for (const config of [
   {},
   { subagents: {} },
