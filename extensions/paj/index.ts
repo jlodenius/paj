@@ -413,11 +413,18 @@ export default function pajExtension(pi: ExtensionAPI) {
             ].join("\n"),
           ),
         ].join("\n\n");
+        let voiceTurn = false;
+        pi.events?.emit("paj:messages:delivering:v1", {
+          sessionId: ctx.sessionManager.getSessionId(),
+          messageIds: details.messageIds,
+          requestTurn() { voiceTurn = true; },
+        });
+        const triggerTurn = disposition === "actionable" || voiceTurn;
         pi.sendMessage(
           { customType: "paj-messages", content, display: true, details },
           {
-            triggerTurn: disposition === "actionable",
-            ...(disposition === "actionable"
+            triggerTurn,
+            ...(triggerTurn
               ? { deliverAs: "followUp" as const }
               : {}),
           },

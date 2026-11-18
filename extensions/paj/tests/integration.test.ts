@@ -198,6 +198,7 @@ async function harness(options: { child?: boolean; busy?: boolean } = {}) {
   return {
     commands,
     tools,
+    bus,
     external: () => {
       let api: Item | undefined;
       bus.emit("paj:external:v1", { reply: (value: Item) => { api = value; } });
@@ -316,6 +317,38 @@ test("the polling integration queues nothing while busy and injects one batch wh
     assert.equal(h.messages[0].details.messageIds.length, 12);
     assert.equal(h.messages[0].delivery.triggerTurn, true);
     assert.equal(h.inbox().length, 0);
+  } finally {
+    await h.close();
+  }
+});
+
+test("update-only delivery wakes the existing model only with an opt-in voice listener", async () => {
+  const h = await harness({ busy: true });
+  try {
+    const arrivals: Item[] = [];
+    h.bus.on("paj:messages:delivering:v1", (event: Item) => {
+      arrivals.push(event);
+      event.requestTurn();
+    });
+    h.setInbox([{ id: "update", kind: "update", from: { name: "worker" }, text: "Capture discarded, not sent." }]);
+    await h.poll();
+    assert.equal(arrivals.length, 0);
+    assert.equal(h.messages.length, 0);
+    h.setIdle(true);
+    await h.poll();
+    assert.equal(arrivals.length, 1);
+    assert.equal(arrivals[0].sessionId, "pi-session");
+    assert.deepEqual(arrivals[0].messageIds, ["update"]);
+    assert.equal(arrivals[0].text, undefined);
+    assert.equal(h.messages[0].delivery.triggerTurn, true);
+    assert.equal(h.messages[0].delivery.deliverAs, "followUp");
+    await h.poll();
+    assert.equal(arrivals.length, 1);
+    h.bus.removeAllListeners("paj:messages:delivering:v1");
+    h.setIdle(true);
+    h.setInbox([{ id: "ordinary", kind: "update", from: { name: "worker" }, text: "Still working." }]);
+    await h.poll();
+    assert.equal(h.messages[1].delivery.triggerTurn, false);
   } finally {
     await h.close();
   }
