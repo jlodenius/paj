@@ -1,7 +1,7 @@
 # paj
 
 `paj` provides local session discovery, agent-to-agent messaging, and an editor bridge for the
-[Pi coding agent](https://github.com/badlogic/pi-mono).
+[Pi coding agent](https://github.com/earendil-works/pi).
 
 ## Install
 
