@@ -76,7 +76,14 @@ Pi sessions register automatically. Use `/agents all` to find agents,
 `/agent-send <agent> <message>` to send a message, and `/subagents` to inspect children.
 Agents can use `inspect_agent` to observe live progress without prompting the target. Access is
 ownership-checked; hidden reasoning and raw tool payloads are excluded. Visible text may still be
-sensitive and becomes part of the inspecting agent's model context.
+sensitive and becomes part of the inspecting agent's model context. Explicitly enabled Captain may
+also observe another main's recorded child, without gaining control rights. Captain starts off on every
+session start, including resume and reload. Upgrade Paj CLI, both inspecting/target extensions, and
+Captain together; unsupported peers reject the added scope.
+
+Capability is recorded in private live registry state and rechecked around asynchronous reads. This
+uses Paj's existing same-OS-user trust boundary: it does not defend against a malicious same-user
+shell or extension that can rewrite runtime state.
 
 From the terminal:
 
@@ -101,6 +108,8 @@ Set `PAJ_PROJECT_DIRS` to comma-separated project search roots; the default is `
 cargo fmt --check
 cargo test --locked
 cargo clippy --all-targets --all-features --locked -- -D warnings
+npm ci
+npm run typecheck
 npm test
 ./tests/lifecycle-recovery.sh
 ./tests/tmux-agent.sh

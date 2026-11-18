@@ -22,7 +22,10 @@ with the user rather than guessing. Use exact names or stable Pi session IDs whe
 Use `inspect_agent` for direct progress evidence before asking a worker for status. Supply an exact
 Paj name, Paj ID, or Pi session ID and optionally a recent-history limit. Main agents can inspect
 other main agents and their direct owned subagents. Subagents can inspect only their own children
-from the current active assignment, not parents, siblings, or unrelated agents.
+from the current active assignment, not parents, siblings, or unrelated agents. An explicitly enabled
+Captain may also observe another main's recorded child; discover it with
+`paj subagent list --parent-pi-session-id ID`. Direct requests through the responsible main; observation
+grants no child assignment, messaging, or control rights.
 
 Inspection reads bounded visible text and safe tool activity without waking the target model,
 steering input, or changing terminal focus. Thinking, image bytes, tool arguments, and raw tool

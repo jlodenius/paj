@@ -37,6 +37,8 @@ pub struct Session {
     pub status: String,
     #[serde(default)]
     pub bridge_socket: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub captain_inspection: Option<Uuid>,
     pub started_at_ms: u64,
     pub last_heartbeat_ms: u64,
 }
@@ -167,6 +169,7 @@ impl Registry {
             model,
             status: "idle".to_owned(),
             bridge_socket: None,
+            captain_inspection: None,
             started_at_ms: now,
             last_heartbeat_ms: now,
         };
@@ -224,6 +227,32 @@ impl Registry {
         lock.lock_exclusive()?;
         let mut session = read_session(&session_dir)?;
         session.model = Some(model);
+        write_json_atomically(&session_dir.join(METADATA_FILE), &session)?;
+        Ok(session)
+    }
+
+    pub fn set_captain_inspection(
+        &self,
+        id: Uuid,
+        pid: u32,
+        pi_session_id: &str,
+        enabled: bool,
+    ) -> Result<Session, RegistryError> {
+        let session_dir = self.find_session_dir(id)?;
+        let lock = open_lock(&session_dir)?;
+        lock.lock_exclusive()?;
+        let mut session = read_session(&session_dir)?;
+        if session.pid != pid
+            || session.pi_session_id.as_deref() != Some(pi_session_id)
+            || session.role != "primary"
+            || session.parent_pi_session_id.is_some()
+            || session_is_stale(&session, now_ms()?, 60_000)
+        {
+            return Err(RegistryError::Protocol(
+                "invalid live Captain identity".into(),
+            ));
+        }
+        session.captain_inspection = enabled.then(Uuid::now_v7);
         write_json_atomically(&session_dir.join(METADATA_FILE), &session)?;
         Ok(session)
     }
@@ -843,6 +872,57 @@ mod tests {
     use crate::project::Project;
 
     use super::{Registration, Registry, RegistryError};
+
+    #[test]
+    fn captain_capability_is_live_identity_scoped_rotated_and_revocable() {
+        let directory = tempdir().unwrap();
+        let registry = Registry::new(directory.path().into()).unwrap();
+        let pid = std::process::id();
+        let session = registry.register(&project(), registration(pid)).unwrap();
+        assert_eq!(session.captain_inspection, None);
+        let enable = || registry.set_captain_inspection(session.id, pid, "pi-session-id", true);
+        let first = enable().unwrap().captain_inspection.unwrap();
+        let second = enable().unwrap().captain_inspection.unwrap();
+        assert_ne!(first, second);
+        assert!(
+            registry
+                .set_captain_inspection(session.id, pid + 1, "pi-session-id", true)
+                .is_err()
+        );
+        assert!(
+            registry
+                .set_captain_inspection(session.id, pid, "stale", true)
+                .is_err()
+        );
+        assert_eq!(
+            registry.show(session.id).unwrap().captain_inspection,
+            Some(second)
+        );
+        assert_eq!(
+            registry
+                .set_captain_inspection(session.id, pid, "pi-session-id", false)
+                .unwrap()
+                .captain_inspection,
+            None
+        );
+        let mut child = registration(pid);
+        child.role = "subagent".into();
+        child.parent_pi_session_id = Some("parent".into());
+        let child = registry.register(&project(), child).unwrap();
+        assert!(
+            registry
+                .set_captain_inspection(child.id, pid, "pi-session-id", true)
+                .is_err()
+        );
+        let stale = registry
+            .register(&project(), registration(u32::MAX))
+            .unwrap();
+        assert!(
+            registry
+                .set_captain_inspection(stale.id, u32::MAX, "pi-session-id", true)
+                .is_err()
+        );
+    }
 
     fn project() -> Project {
         Project {

@@ -10,12 +10,12 @@ import {
 } from "./inspection-types.ts";
 
 const TIMEOUT = 5_000;
-const fail = (message: string): never => { throw new Error(`Paj inspection: ${message}`); };
+function fail(message: string): never { throw new Error(`Paj inspection: ${message}`); }
 const object = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
 const string = (value: unknown): value is string =>
   typeof value === "string" && value.length > 0 && Buffer.byteLength(value) <= MAX_INSPECTION_TEXT_BYTES;
-const keys = (value: Record<string, unknown>, allowed: string[]) => {
+const keys = (value: object, allowed: string[]) => {
   if (Object.keys(value).some((key) => !allowed.includes(key))) fail("unexpected response fields");
 };
 function identity(value: unknown): asserts value is InspectionCaller {
@@ -85,9 +85,9 @@ async function authorizeFresh(
   identity(target);
   const rawSessions = await registry.listSessions();
   validateSessions(rawSessions);
-  const sessions = rawSessions.map((s) => ({ ...s }));
-  const source = sessions.find((s) => same(s, caller));
-  const destination = sessions.find((s) => same(s, target));
+  let sessions = rawSessions.map((s) => ({ ...s }));
+  let source = sessions.find((s) => same(s, caller));
+  let destination = sessions.find((s) => same(s, target));
   if (!source || !destination || !stable(destination, target) || source.id === destination.id ||
       source.piSessionId === destination.piSessionId) fail("stale identity or self inspection");
   if (primary(source) && primary(destination)) return { caller: source, target: destination, scope: "primary" };
@@ -100,6 +100,16 @@ async function authorizeFresh(
     (s.childPiSessionId != null && !string(s.childPiSessionId)) ||
     (s.childPajSessionId != null && !string(s.childPajSessionId)) ||
     (s.taskState !== undefined && s.taskState !== "active" && s.taskState !== "completed"))) fail("invalid spawn registry");
+  const refreshed = await registry.listSessions();
+  validateSessions(refreshed);
+  const nextSource = refreshed.find((s) => same(s, caller));
+  const nextDestination = refreshed.find((s) => same(s, target));
+  if (!nextSource || !nextDestination || !stable(source, nextSource) || !stable(destination, nextDestination) ||
+      (primary(source) && destination.parentPiSessionId !== source.piSessionId &&
+        source.captainInspection !== nextSource.captainInspection)) fail("identity or capability changed during ownership lookup");
+  sessions = refreshed.map((s) => ({ ...s }));
+  source = { ...nextSource };
+  destination = { ...nextDestination };
   const activeSpawn = (child: InspectionSession, seen = new Set<string>()): InspectionSpawn => {
     if (seen.has(child.id) || seen.size >= 32) fail("cyclic or excessive ownership ancestry");
     seen.add(child.id);
@@ -117,6 +127,17 @@ async function authorizeFresh(
   let current: InspectionSpawn | undefined;
   if (!primary(source)) current = activeSpawn(source);
   const owned = spawnFor(destination, sessions, spawns);
+  if (primary(source) && string(source.captainInspection) &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(source.captainInspection) &&
+      destination.parentPiSessionId !== source.piSessionId) {
+    const parent = sessions.find((s) => s.piSessionId === destination.parentPiSessionId)!;
+    if (!primary(parent) || owned.parentTaskId !== undefined) fail("invalid main-owned child scope");
+    return { caller: source, target: destination,
+      scope: JSON.stringify(["captain", source.captainInspection,
+        parent.id, parent.piSessionId, parent.pid, parent.startedAtMs, parent.bridgeSocket,
+        owned.spawnId, owned.parentPiSessionId, owned.parentPid, owned.parentTaskId,
+        owned.childPiSessionId, owned.childPajSessionId, owned.taskId, owned.taskState]) };
+  }
   if (destination.parentPiSessionId !== source.piSessionId || owned.parentPid !== source.pid ||
       owned.parentPiSessionId !== source.piSessionId ||
       (primary(source) ? owned.parentTaskId !== undefined :

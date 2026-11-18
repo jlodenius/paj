@@ -161,6 +161,16 @@ enum SessionCommands {
     },
     /// Update the full provider/model ID advertised by a live session.
     Model { id: Uuid, model: String },
+    /// Advertise or revoke live Captain observation capability (same-user runtime API).
+    CaptainInspection {
+        id: Uuid,
+        #[arg(long)]
+        pid: u32,
+        #[arg(long)]
+        pi_session_id: String,
+        #[arg(long, action = clap::ArgAction::Set)]
+        enabled: bool,
+    },
     /// Remove a session and its pending messages from the registry.
     Unregister { id: Uuid },
     /// List live sessions in the current project or all projects.
@@ -397,6 +407,15 @@ fn run_session_command(registry: &Registry, command: SessionCommands, json: bool
         }
         SessionCommands::Model { id, model } => {
             let session = registry.set_model(id, model)?;
+            if json { print_json(&session) } else { Ok(()) }
+        }
+        SessionCommands::CaptainInspection {
+            id,
+            pid,
+            pi_session_id,
+            enabled,
+        } => {
+            let session = registry.set_captain_inspection(id, pid, &pi_session_id, enabled)?;
             if json { print_json(&session) } else { Ok(()) }
         }
         SessionCommands::Unregister { id } => {

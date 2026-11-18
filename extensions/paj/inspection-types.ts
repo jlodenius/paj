@@ -13,6 +13,7 @@ export interface InspectionSession {
   name?: string;
   projectRoot?: string;
   bridgeSocket?: string;
+  captainInspection?: string;
   startedAtMs?: number;
   lastHeartbeatMs?: number;
   status?: string;
