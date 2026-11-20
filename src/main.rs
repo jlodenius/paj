@@ -8,7 +8,9 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use paj::bridge::{BridgeClient, BridgeEvent, EditorRequest, bridge_is_available};
 use paj::project::Project;
-use paj::registry::{Message, MessageKind, MessageOptions, Registration, Registry, Session};
+use paj::registry::{
+    MAX_PAGE_MESSAGES, Message, MessageKind, MessageOptions, Registration, Registry, Session,
+};
 use paj::subagent::{SpawnOptions, SpawnRecord, SpawnStore};
 use serde::Serialize;
 use uuid::Uuid;
@@ -204,6 +206,14 @@ enum MessageCommands {
     Pending { session: Uuid },
     /// Inspect acknowledged and superseded messages retained in the archive.
     History { session: Uuid },
+    /// Read a bounded page of received messages without acknowledging them.
+    Read {
+        session: Uuid,
+        #[arg(long)]
+        after: Option<String>,
+        #[arg(long, default_value_t = MAX_PAGE_MESSAGES, value_parser = clap::value_parser!(u16).range(1..=i64::from(MAX_PAGE_MESSAGES)))]
+        limit: u16,
+    },
     /// Acknowledge and archive a pending message.
     Ack { session: Uuid, message: Uuid },
 }
@@ -241,7 +251,12 @@ fn main() -> Result<()> {
             run_session_command(&Registry::from_environment()?, command, cli.json)
         }
         Commands::Message { command } => {
-            run_message_command(&Registry::from_environment()?, command, cli.json)
+            let registry = if matches!(command, MessageCommands::Read { .. }) {
+                Registry::read_only_from_environment()?
+            } else {
+                Registry::from_environment()?
+            };
+            run_message_command(&registry, command, cli.json)
         }
         Commands::Bridge { command } => {
             run_bridge_command(&Registry::from_environment()?, command, cli.json)
@@ -492,6 +507,15 @@ fn run_message_command(registry: &Registry, command: MessageCommands, json: bool
                 print_messages(&messages);
                 Ok(())
             }
+        }
+        MessageCommands::Read {
+            session,
+            after,
+            limit,
+        } => {
+            let page = registry.read_message_page(session, after.as_deref(), limit)?;
+            println!("{}", serde_json::to_string(&page)?);
+            Ok(())
         }
         MessageCommands::Ack { session, message } => {
             registry.acknowledge_message(session, message)?;

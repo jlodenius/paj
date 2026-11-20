@@ -95,6 +95,46 @@ paj --help
 
 Set `PAJ_PROJECT_DIRS` to comma-separated project search roots; the default is `~/Development`.
 
+### Read received messages in pages
+
+```sh
+paj --json message read <recipient-paj-uuid> --limit 128
+paj --json message read <recipient-paj-uuid> --after <nextCursor>
+```
+
+`message read` takes one full Paj session UUID, not a name, prefix or Pi session ID. It uses the
+same private local runtime and same-OS-user access as `message pending` and `message history`.
+It includes both pending and archived messages, including superseded messages, in acceptance order.
+It does not acknowledge anything or store a reader's progress. The original command interfaces and
+normal behavior are unchanged.
+
+On success the command prints `{ "status": "ok", "messages": [...], "nextCursor": "...",
+"hasMore": true }`. Pass the opaque `nextCursor` back for the same recipient only, after handling
+all messages in the page. Omit `--after` to start at the beginning. The page has at most `--limit`
+records (1–128, default 128) and at most 1 MiB of compact JSON including the newline. A byte limit
+can shorten a page. `hasMore: false` means caught up at that read; reuse the cursor to check for
+later arrivals. Acknowledgement, supersession and session removal do not move records in this order.
+
+A gap is `{ "status": "gap", "reason": "..." }`, optionally with the affected `messageId`, and
+never advances the cursor. `unindexed` means the recipient has no index; `reset` means the supplied
+cursor no longer matches the index. `changed` covers an interrupted write or a detected change to
+message directories outside this version of Paj. `missing` and `invalid` report unavailable index
+records or inconsistent payloads. `oversized` means the next record will not fit the limits; the
+legacy commands can still read it, but this reader cannot continue past it. Invalid argument syntax
+and I/O failures exit nonzero.
+
+For the upgrade to paged reads, move all Paj participants together to the new version and point
+`PAJ_RUNTIME_DIR` at the same new, empty private directory. Do not mix versions in one runtime.
+The feed starts at zero for each fresh registration. Nothing is migrated from the old runtime;
+its pending and archived messages stay there. Finish or explicitly reissue outstanding work as
+appropriate; a fresh cursor is not evidence that old work was handled.
+
+Paj does not expire archived messages or the index. External removal of retained records, an invalid
+index, or an interrupted indexed write can leave a gap; there is no automatic repair, skip, or
+backfill. Readers should not treat a gap as caught up. Paj fails closed if it cannot initialize the
+index or mark it out of date before a message mutation. The index detects interrupted processes,
+not arbitrary filesystem edits or power-loss corruption.
+
 ## Reference
 
 - [Agent communication](skills/paj/SKILL.md)

@@ -11,6 +11,9 @@ use uuid::Uuid;
 use crate::project::Project;
 use crate::subagent::{SpawnStore, TaskState};
 
+mod message_read;
+pub use message_read::{MAX_PAGE_BYTES, MAX_PAGE_MESSAGES, MessageGap, MessagePage};
+
 const INBOX_DIRECTORY: &str = "inbox";
 const ARCHIVE_DIRECTORY: &str = "archive";
 const LOCK_FILE: &str = ".lock";
@@ -116,13 +119,22 @@ pub struct Registry {
 
 impl Registry {
     pub fn from_environment() -> Result<Self, RegistryError> {
-        if let Some(root) = env::var_os("PAJ_RUNTIME_DIR") {
-            return Self::new(PathBuf::from(root));
-        }
+        Self::new(Self::runtime_root()?)
+    }
 
+    pub fn read_only_from_environment() -> Result<Self, RegistryError> {
+        Ok(Self {
+            root: Self::runtime_root()?,
+        })
+    }
+
+    fn runtime_root() -> Result<PathBuf, RegistryError> {
+        if let Some(root) = env::var_os("PAJ_RUNTIME_DIR") {
+            return Ok(PathBuf::from(root));
+        }
         let runtime =
             env::var_os("XDG_RUNTIME_DIR").ok_or(RegistryError::MissingRuntimeDirectory)?;
-        Self::new(PathBuf::from(runtime).join("paj"))
+        Ok(PathBuf::from(runtime).join("paj"))
     }
 
     pub fn new(root: PathBuf) -> Result<Self, RegistryError> {
@@ -173,12 +185,14 @@ impl Registry {
             started_at_ms: now,
             last_heartbeat_ms: now,
         };
+        let _protocol = lock_protocol(&self.root)?;
         let session_dir = self.session_dir(&session.project_id, session.id);
         let mut session = session;
         session.bridge_socket = Some(session_dir.join("bridge.sock"));
         fs::create_dir_all(&session_dir)?;
         let lock = create_lock(&session_dir)?;
         lock.lock_exclusive()?;
+        self.initialize_message_index(session.id, &session.project_id)?;
         write_json_atomically(&session_dir.join(METADATA_FILE), &session)?;
 
         Ok(session)
@@ -263,8 +277,7 @@ impl Registry {
         let lock = open_lock(&session_dir)?;
         lock.lock_exclusive()?;
         let session = read_session(&session_dir)?;
-        self.archive_pending_messages(id, &session_dir)?;
-        fs::remove_dir_all(session_dir)?;
+        self.archive_and_remove_session(id, &session_dir)?;
         Ok(session)
     }
 
@@ -506,16 +519,22 @@ impl Registry {
         let directory = self.find_session_dir(message.to)?;
         let lock = open_lock(&directory)?;
         lock.lock_exclusive()?;
-        let filename = format!("{}.json", message.id);
-        if !self.message_was_archived(message.id)?
-            && !directory.join(INBOX_DIRECTORY).join(&filename).is_file()
-        {
-            write_json_atomically(&directory.join(INBOX_DIRECTORY).join(filename), message)?;
+        let path = directory
+            .join(INBOX_DIRECTORY)
+            .join(format!("{}.json", message.id));
+        let added = !self.message_was_archived(message.id)? && !path.is_file();
+        if !added && message.supersedes.is_none() {
+            return Ok(());
         }
-        if let Some(id) = message.supersedes {
-            archive_message(&directory, &self.archive_dir(message.to), id)?;
-        }
-        Ok(())
+        self.update_message_index(message.to, added.then_some(message.id), || {
+            if added {
+                write_json_atomically(&path, message)?;
+            }
+            if let Some(id) = message.supersedes {
+                archive_message(&directory, &self.archive_dir(message.to), id)?;
+            }
+            Ok(())
+        })
     }
 
     pub fn pending_messages(&self, session_id: Uuid) -> Result<Vec<Message>, RegistryError> {
@@ -554,11 +573,14 @@ impl Registry {
         Ok(false)
     }
 
-    fn archive_pending_messages(&self, id: Uuid, directory: &Path) -> Result<(), RegistryError> {
-        for message in read_message_directory(&directory.join(INBOX_DIRECTORY))? {
-            archive_message(directory, &self.archive_dir(id), message.id)?;
-        }
-        Ok(())
+    fn archive_and_remove_session(&self, id: Uuid, directory: &Path) -> Result<(), RegistryError> {
+        self.update_message_index(id, None, || {
+            for message in read_message_directory(&directory.join(INBOX_DIRECTORY))? {
+                archive_message(directory, &self.archive_dir(id), message.id)?;
+            }
+            fs::remove_dir_all(directory)?;
+            Ok(())
+        })
     }
 
     fn read_messages(&self, session_id: Uuid, folder: &str) -> Result<Vec<Message>, RegistryError> {
@@ -577,7 +599,9 @@ impl Registry {
         let session_dir = self.find_session_dir(session_id)?;
         let lock = open_lock(&session_dir)?;
         lock.lock_exclusive()?;
-        archive_message(&session_dir, &self.archive_dir(session_id), message_id)
+        self.update_message_index(session_id, None, || {
+            archive_message(&session_dir, &self.archive_dir(session_id), message_id)
+        })
     }
 
     pub fn gc(&self, stale_after: Duration) -> Result<Vec<Session>, RegistryError> {
@@ -595,8 +619,7 @@ impl Registry {
             lock.lock_exclusive()?;
             let session = read_session(&directory)?;
             if session_is_stale(&session, now, stale_after_ms) {
-                self.archive_pending_messages(session.id, &directory)?;
-                fs::remove_dir_all(directory)?;
+                self.archive_and_remove_session(session.id, &directory)?;
                 removed.push(session);
             }
         }
@@ -656,7 +679,7 @@ impl Registry {
 }
 
 pub(crate) fn lock_protocol(root: &Path) -> Result<File, RegistryError> {
-    let path = root.join(".protocol.lock");
+    let path = root.join(message_read::PROTOCOL_LOCK);
     let file = OpenOptions::new()
         .read(true)
         .write(true)
